@@ -15,10 +15,10 @@
 | **OSC output** | UDP at audio-block rate (~187 Hz) to any number of destinations, including a subnet broadcast address. |
 | **Browser UI** | Tune every parameter live and pick the input device. The UI does no signal processing: the 2D FFT graph renders the exact bytes sent on `/audio/fft`. |
 | **Realtime-safe** | The audio callback never allocates, locks or logs. All DSP runs in real-time-scheduled worker threads. |
-| **Persistence** | Every setting is saved to `configs/main.yaml`. Named presets can be saved and loaded. |
+| **Persistence** | Every setting is saved to `realtime/configs/main.yaml`. Named presets can be saved and loaded. |
 
 <p align="center">
-  <img src="assets/screenshots/ui.webp" alt="Browser UI: band energy bars, rolling L/M/H lines, scene visualizer and the 3D FFT view, with the control panel on the right" width="100%">
+  <img src="realtime/assets/screenshots/ui.webp" alt="Browser UI: band energy bars, rolling L/M/H lines, scene visualizer and the 3D FFT view, with the control panel on the right" width="100%">
 </p>
 
 ## Quick start
@@ -30,7 +30,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # once
 sudo apt install libasound2-dev pkg-config                         # Linux only (ALSA headers)
 
 git clone https://github.com/M-E-A-T/BUTCHER-3.0.git
-cd BUTCHER-3.0
+cd BUTCHER-3.0/realtime
 make start            # release build + server + UI in your browser
 ```
 
@@ -47,7 +47,7 @@ engine/target/release/audio-server [flags]
 | `--open` | Open the UI in your default browser |
 | `--device N` | Use input device `N` (pick it in the UI otherwise) |
 | `--no-ws` | Headless: OSC only, no UI or WebSocket |
-| `--config PATH` | Use another config file instead of `configs/main.yaml` |
+| `--config PATH` | Use another config file instead of `realtime/configs/main.yaml` |
 | `--log-level DEBUG` | More logging |
 
 > [!TIP]
@@ -65,7 +65,7 @@ engine/target/release/audio-server [flags]
 
 FFT bins are auto-scaled `[0, 1]` by default. Tick **raw dB** in the UI (or set `fft.send_raw_db: true`) to get the raw log spectrum instead.
 
-Destinations live in `configs/main.yaml`. Stop the server before editing it: the server rewrites the file whenever a setting changes in the UI.
+Destinations live in `realtime/configs/main.yaml`. Stop the server before editing it: the server rewrites the file whenever a setting changes in the UI.
 
 ```yaml
 osc:
@@ -93,7 +93,7 @@ Binary FFT frame: `[type=1:u8][reserved:u8][n_bins:u16 LE][float32 × n_bins LE]
 ## How it works
 
 <p align="center">
-  <img src="assets/architecture_overview.webp" alt="Architecture: audio callback → ring buffer → DSP and FFT worker threads → OSC and WebSocket → apps and browser" width="95%">
+  <img src="realtime/assets/architecture_overview.webp" alt="Architecture: audio callback → ring buffer → DSP and FFT worker threads → OSC and WebSocket → apps and browser" width="95%">
 </p>
 
 - **The audio callback does almost nothing.** It mixes to mono, copies the block into a lock-free ring buffer and wakes two workers.
@@ -105,13 +105,16 @@ Binary FFT frame: `[type=1:u8][reserved:u8][n_bins:u16 LE][float32 × n_bins LE]
 ## Layout
 
 ```
-engine/   Rust workspace: dsp (signal-processing library) + server (the audio-server binary)
-ui/       Browser UI: plain ES modules, no build step
-configs/  main.example.yaml (defaults); main.yaml + presets are created at runtime
-testdata/ Wire-format captures used by the Rust tests
+realtime/
+  engine/    Rust workspace: dsp (signal-processing library) + server (the audio-server binary)
+  ui/        Browser UI: plain ES modules, no build step
+  configs/   main.example.yaml (defaults); main.yaml + presets are created at runtime
+  assets/    README images
+  testdata/  Wire-format captures used by the Rust tests
+  Makefile   make start / make build / make test (run from realtime/)
 ```
 
-Run the tests with `make test`.
+Run the tests with `make test` from `realtime/`.
 
 ## License
 
