@@ -1,0 +1,27 @@
+---
+- name: stop sleep!
+  hosts: 
+    #- meat
+    - meat2
+  gather_facts: no
+
+  vars:
+    project_root: "/home/{{ ansible_user }}/Desktop/BUTCHER-X-NDI"
+    venv_dir: "{{ project_root }}/.venv"
+
+  tasks:
+    - name: Find process
+      shell: pgrep -f "NDI2.py"
+      register: pids
+      failed_when: false
+      changed_when: false
+
+    - name: Kill process
+      shell: kill {{ item }}
+      loop: "{{ pids.stdout_lines }}"
+      when: pids.stdout_lines | length > 0
+
+
+
+
+    

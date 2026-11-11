@@ -1,0 +1,61 @@
+---
+- name: stop sleep!
+  hosts: 
+    - meat
+    - meat2
+  gather_facts: no
+
+  vars:
+    project_root: "/home/{{ ansible_user }}/Desktop/BUTCHER-X-NDI"
+    venv_dir: "{{ project_root }}/.venv"
+
+  tasks:
+    - name: Mask systemd sleep targets (as root)
+      become: true
+      ansible.builtin.shell: |
+        systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+      args:
+        executable: /bin/bash
+
+    - name: Configure Cinnamon power settings via gsettings (as GUI user)
+      become: false
+      ansible.builtin.shell: |
+        gsettings set org.cinnamon.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing'
+        gsettings set org.cinnamon.settings-daemon.plugins.power sleep-inactive-battery-type 'nothing'
+        gsettings set org.cinnamon.desktop.session idle-delay 0
+        gsettings set org.cinnamon.desktop.screensaver lock-enabled false
+      args:
+        executable: /bin/bash
+      environment:
+        DISPLAY: ":0"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus"   # adjust UID if needed
+
+- name: Start visualReceiver on remote hosts
+  hosts: 
+  - meat
+  - meat2
+  gather_facts: no
+
+  vars:
+    project_root: "/home/{{ ansible_user }}/Desktop/BUTCHER-X-NDI/Portable_NDI_launcher"
+    venv_dir: "{{ project_root }}/.venv"
+
+  tasks:
+
+    - name: run NDI shell script
+      ansible.builtin.shell: |
+        ./installAndLaunchNdiViewer.sh
+      args:
+        chdir: "{{ project_root }}"
+        executable: /bin/bash
+      environment:
+        DISPLAY: ":0"
+        async: 86400
+        poll: 0
+     
+
+
+
+
+
+    

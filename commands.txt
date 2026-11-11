@@ -1,0 +1,13 @@
+
+ansible-playbook -i ansible/config/hosts.ini ansible/ping.yml
+
+
+ansible-playbook -i ansible/config/hosts.ini ansible/sync_files.yml
+
+
+ansible-playbook -i ansible/config/hosts.ini ansible/killNdiReceivers.yml
+
+ansible-playbook -i ansible/config/hosts.ini ansible/installAndRunNdiReceivers.yml -K
+
+ansible-playbook -i ansible/config/hosts.ini ansible/runNdiReceivers.yml -K
+
