@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="en" translate="no">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="google" content="notranslate" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Realtime Audio Server</title>
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#14161a" />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body class="offline">
+    <header class="topbar">
+      <h1 class="brand"><svg class="brand-mark" viewBox="0 0 16 16" aria-hidden="true"><rect x="1" y="9" width="3" height="6" rx="1" style="fill: var(--low)"/><rect x="6.5" y="4" width="3" height="11" rx="1" style="fill: var(--mid)"/><rect x="12" y="7" width="3" height="8" rx="1" style="fill: var(--high)"/></svg><span class="brand-name">Realtime Audio Server</span></h1>
+      <span id="bpm-readout" class="bpm-readout" title="**Live tempo estimate.**
+
+Rolling BPM derived from the **low-band onset stream** (the same `/audio/onset/low` events sent over OSC and shown by the square flash above the L bar). Reads `— BPM` until a few onsets have accumulated, or after long silence.
+
+Tune the detector by tuning the `low` signal: bandpass edges, smoothing tau, auto-scaler strength, and noise gate all shape what the tracker sees.
+
+Also published as OSC `/audio/bpm <f>` (per audio block). The `mid` and `high` onset streams are pure rising-edge triggers and do not feed BPM."><span class="bpm-value">—</span><span class="bpm-unit">BPM</span></span>
+      <div class="topbar-right">
+        <label class="topbar-fps" title="**History window** (seconds).
+
+How far back in time both history views reach:
+
+- **L/M/H rolling lines** — the width of the chart
+- **FFT 3D** — the distance to the horizon
+
+Larger values pack more time into the same space (and slow the 3D waves down).
+
+*Visual only — not persisted, not sent to the server.*">History <input type="range" id="history-s" min="2" max="30" step="0.001" data-log="1" aria-label="History window" /> <span id="history-s-val"></span></label>
+        <div class="topbar-fps palette-picker"><span id="palette-label">Palette</span> <button type="button" id="palette-select" class="pal-btn" title="**Color palette** for the whole UI: band colors (bars, lines, scene, FFT overlays), the 2D spectrum ramp, the accent, the background tint — and every 3D style, which maps its own roles onto the low / mid / high colors (e.g. *Synthwave* + *Neon* = classic outrun).
+
+*Visual only — saved on the server so every browser shows the same palette.*" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="palette-label palette-select"></button><ul id="palette-menu" class="pal-menu" role="listbox" aria-label="Color palette" tabindex="-1" hidden></ul></div>
+        <label class="topbar-fps" title="**UI refresh rate.** Target frame rate for the browser visualization.
+
+Drives both:
+
+- how often the server pushes L/M/H snapshots and FFT frames over WS
+- how often the canvases redraw (throttled to match)
+
+Snaps to standard frame rates: `15 / 24 / 30 / 40 / 60 fps`, capped at 60.">UI refresh rate <input type="range" id="ws-hz" min="0" max="4" step="1" /> <span id="ws-hz-val"></span></label>
+        <div class="badges">
+          <span class="badge badge-audio" id="audio-status" role="status" hidden title="**No audio from the input device.** The server received no audio blocks for over a second — usually the mic was unplugged or its driver stopped.
+
+The server keeps trying to reopen it every few seconds (same device by name, else the system default) and sends `/audio/lmh 0 0 0` + `/audio/bpm 0` over OSC so downstream visuals settle to silence instead of freezing. A silent-but-working mic does *not* trigger this.">no audio input</span>
+          <button type="button" class="badge badge-conn connecting" id="ws-status" title="**Connection to the audio server** (WebSocket).
+
+- **live** — connected; controls and visualizers are in sync with the server.
+- **reconnecting** — the server is unreachable; the UI retries automatically with backoff. *Click to retry right away.*
+
+While disconnected the visualizers are cleared and the controls are disabled, so nothing stale is ever shown as live."><span class="badge-text">connecting…</span></button>
+          <span class="badge badge-metric" id="server-fps">srv — Hz</span>
+          <span class="badge badge-metric" id="ui-fps">ui — fps</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="grid" id="main-grid">
+      <section class="viz-grid">
+        <div class="viz-card" data-card="bars">
+          <div class="viz-title"><span title="**L/M/H output + per-band onset triggers — both sent over OSC.**
+
+The three colored bars (`low`, `mid`, `high`) are the live signal that ships to downstream consumers. The **white peak-hold ticks are visual only** — not transmitted. The **square above each bar** flashes on each onset detected for that band (server-side detector running on the same band signal — see the Onset detection section in the side panel for tuning).
+
+Each onset is sent over OSC as `/audio/onset/{low,mid,high}` (only on onsets, no `0` filler) and as `low_onset`/`mid_onset`/`high_onset` flags in the WS snapshot.
+
+# OSC
+
+- Address: `/audio/lmh`
+- Payload: `[low: f32, mid: f32, high: f32]` — three floats per message
+- Range: `[0, 1]` typically (unclamped — *master gain* > 1 can push above)
+- Rate: matches the audio block rate (~`sr / blocksize`, e.g. ~187 Hz at 48 kHz / 256-sample blocks)
+- Default destination: `127.0.0.1:9000` (configurable in `configs/main.yaml` under `osc.destinations`)
+- Band edges (Hz) are announced once on `/audio/meta` — see config or the band selector.
+
+# WebSocket
+
+Same values are also published in the JSON `snapshot` frames on `ws://127.0.0.1:8765` (fields `low` / `mid` / `high`, master gain applied; unscaled smoothed RMS in `low_raw` / `mid_raw` / `high_raw`).">Band energies</span> <span class="viz-tools"><label class="inline" title="**Peak-hold decay rate** (units / sec).
+
+Affects the white peak ticks on this graph **and** on the FFT graph.
+
+- Smaller → peaks linger longer
+- Larger → peaks fall faster
+
+*Visual only — does not affect DSP or OSC payload.*"><input type="range" id="peak-decay" class="title-slider" min="0.05" max="3" step="0.001" data-log="1" aria-label="Peak-hold decay rate" /> <span id="peak-decay-val"></span></label> <label class="inline" title="**Display per-band onset squares.**
+
+Shows / hides the three colored squares above the L/M/H bars that flash on each detected onset (low / mid / high).
+
+*Visual only — does NOT affect server-side detection, OSC `/audio/onset/*` events, or WS snapshot fields. The detectors keep running and the wire payload is unchanged regardless of this toggle.*
+
+Off by default — turn on when actively tuning onset parameters or driving the UI itself from the band triggers."><input type="checkbox" id="show-onsets" /> onsets</label></span></div>
+          <canvas id="viz-bars" width="320" height="200" role="img" aria-label="Band energy bars: low, mid, high"></canvas>
+        </div>
+        <div class="viz-card" data-card="lines">
+          <div class="viz-title"><span title="**L/M/H output — sent over OSC.**
+
+Rolling history of the same three signals as the bar graph. The colored polylines (`low`, `mid`, `high`) are what ships downstream; peak-hold markers on the bars graph are visual only.
+
+# OSC
+
+- Address: `/audio/lmh`
+- Payload: `[low: f32, mid: f32, high: f32]`
+- Range: `[0, 1]` typically (unclamped if *master gain* > 1)
+- Rate: per audio block (~`sr / blocksize`, e.g. ~187 Hz at 48 kHz / 256)
+- Default destination: `127.0.0.1:9000` (configure in `configs/main.yaml` → `osc.destinations`)
+- Meta on `/audio/meta` carries `[sr, blocksize, n_fft_bins, low_lo, low_hi, mid_lo, mid_hi, high_lo, high_hi]`
+
+# WebSocket
+
+Also available in the JSON `snapshot` frames on `ws://127.0.0.1:8765` (fields `low` / `mid` / `high`, master gain applied).">L/M/H rolling lines</span></div>
+          <canvas id="viz-lines" width="640" height="200" role="img" aria-label="Rolling history of low, mid and high band energy"></canvas>
+        </div>
+        <div class="viz-card" data-card="scene">
+          <div class="viz-title"><span title="**Visual aid only — not an output signal.**
+
+The disc, tint, and sparkles are a decorative reactive scene driven from the same L/M/H values as the other graphs. Nothing here is transmitted: no separate OSC address, no separate WS payload.
+
+To consume the underlying signal, use `/audio/lmh` (see the bars or rolling-lines tooltips).">L/M/H Scene Visualizer</span></div>
+          <canvas id="viz-scene" width="640" height="200" role="img" aria-label="Decorative scene driven by the band energies"></canvas>
+        </div>
+        <div class="viz-card" data-card="fft">
+          <div class="viz-title"><span title="**FFT output — sent over OSC.**
+
+What you see here is **byte-identical** to the wire payload. The white peak-hold ticks are visual only.
+
+# OSC
+
+- Address: `/audio/fft`
+- Payload: `n_bins` float32 values (default `n_bins = 128`, configurable via `fft.n_bins` in `configs/main.yaml`)
+- Range:
+  - **raw dB OFF** (default) → `[0, 1]` post-processed (smoother → auto-scaler → gate → tanh → strength blend)
+  - **raw dB ON** → log-spaced spectrum in dB; empty low bins are rewritten to `db_floor` on OSC so consumers stay in-range
+- Rate: hop-rate (~`sr / hop`, e.g. ~94 Hz at 48 kHz / hop=512). Only sent when the FFT worker is enabled and `osc.send_fft` is true.
+- Default destination: `127.0.0.1:9000`
+- Bin layout: log-spaced from `fft.f_min` to Nyquist; geometry announced once on `/audio/meta` (`n_fft_bins`).
+
+# WebSocket
+
+Same bins are pushed as a binary frame on `ws://127.0.0.1:8765`:
+`[type=1: u8][reserved: u8][n_bins: u16 LE][float32 × n_bins LE]`. The `meta.fft_send_raw_db` flag tells you which interpretation applies.">FFT <span id="fft-title-mode" class="viz-title-mode">log-x · scaled 0..1</span></span> <span class="viz-tools"><label class="inline" title="**Enable / disable the FFT worker.**
+
+Disabling saves CPU when you only need L/M/H."><input type="checkbox" id="fft-toggle" /> enable</label> <label class="inline" title="**What you see is what's sent.** This graph is byte-identical to the `/audio/fft` OSC payload.
+
+- **OFF** (default): server runs the same per-bin pipeline as L/M/H (smoother → asymmetric auto-scaler → soft gate → tanh → strength blend) and sends `[0..1]` post-processed values.
+- **ON**: server sends the raw wire-dB log spectrum (sentinels rendered as gaps).
+
+The server is authoritative — toggling sends `set_fft_send_raw_db`; the OSC payload switches in lockstep with the visualization."><input type="checkbox" id="fft-raw-db" /> raw dB</label> <label class="inline" title="**FFT bins** — how many log-spaced frequency bins the spectrum has (`n_fft_bins`, from `f_min` up to Nyquist).
+
+- **More bins** → finer frequency detail, bigger `/audio/fft` OSC packets (4 bytes per bin). Range `16`–`1024`.
+- **Fewer bins** → coarser, cheaper, smaller packets.
+
+The low end can't get finer than the FFT window allows (~47 Hz per linear bin at 1024 samples / 48 kHz); log bins narrower than that are filled by interpolation.
+
+**Changes the OSC payload**: downstream consumers see the new bin count on `/audio/meta`."><input type="range" id="fft-bins" class="title-slider" min="0" max="12" step="1" aria-label="FFT bin count" /> <span id="fft-bins-val"></span></label> <label class="inline" id="fft3d-style-wrap" hidden title="**3D style** — how the history is drawn.
+
+- **Cloud** — dust on a faint sea, in the palette's band colors
+- **Aurora** — curtains of light hanging from each spectrum
+- **Topo** — a survey map with contour lines, seen from above
+- **Synthwave** — neon wireframe rolling toward a striped sun
+- **Engraving** — ink hatching on warm paper
+- **Embers** — peaks throw sparks that drift off into the dark
+
+*Visual only — does not affect DSP or the OSC payload.*"><select id="fft3d-style" class="title-select" aria-label="3D style"></select></label> <span class="seg" role="radiogroup" aria-label="FFT view" title="**2D / 3D view.**
+
+- **2D**: spectrum with peak-hold ticks and the draggable band overlay.
+- **3D**: history "ocean" — the newest spectrum is the front wave; older spectra recede toward the horizon, shrinking and fading. Depth = the **History** slider in the top bar. Band edges are then edited from the side panel.
+
+*Visual only — does not affect DSP or the OSC payload.*"><label><input type="radio" name="fft-view" id="fft-view-2d" value="2d" /><span>2D</span></label><label><input type="radio" name="fft-view" id="fft-view-3d" value="3d" /><span>3D</span></label></span> <button type="button" class="icon-btn" id="fft-fullscreen" aria-label="Full screen" title="**Full screen** (Esc to exit).">⛶</button></span></div>
+          <div class="viz-stack">
+            <canvas id="viz-fft" width="640" height="200" role="img" aria-label="FFT spectrum"></canvas>
+          </div>
+        </div>
+        <div class="conn-overlay" id="conn-overlay" role="status">
+          <div class="conn-card">
+            <span class="conn-spinner" aria-hidden="true"></span>
+            <span id="conn-overlay-msg">Connecting to the audio server…</span>
+            <button type="button" id="conn-overlay-retry" hidden>retry now</button>
+          </div>
+        </div>
+      </section>
+
+      <div class="grid-resizer" id="grid-resizer" role="separator" aria-orientation="vertical" aria-label="Resize side panel" tabindex="0" title="Drag (or use ← / →) to resize the side panel. Drag it almost closed to collapse."></div>
+
+      <aside class="controls">
+        <fieldset>
+          <legend>Input device <span id="device-status" class="device-status" role="status" hidden></span></legend>
+          <select id="device-select" aria-label="Input device"></select>
+          <button id="device-refresh" title="**Re-enumerate input devices** via PortAudio.
+
+Use after plugging / unplugging a device. PortAudio only sees new devices after a re-init, which briefly restarts the audio input (~150 ms gap; levels keep their auto-scaler state).">refresh</button>
+          <button id="device-probe" title="**Re-enumerate AND probe** every input briefly (~200 ms each) to detect which ones are currently producing signal.
+
+Devices that saw audio during the probe get a ★.
+
+*Slower than refresh, and momentarily grabs each device — use sparingly.*">probe</button>
+        </fieldset>
+
+        <fieldset id="fieldset-bandpass">
+          <legend>Bandpass edges</legend>
+          <div id="freq-axis" title="**Bandpass edges.**
+
+- Click a colored band to **select** it.
+- Drag its **body** to shift the whole band.
+- Drag a **left / right handle** to move just that edge.
+- Click outside any band to deselect.
+
+Bands may overlap."></div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Auto-scaler</legend>
+          <label title="**Master gain.** Final multiplier on everything that goes out (L/M/H + FFT, both OSC and WebSocket).
+
+- `1.0` (centered) — the post-processing pipeline's natural output
+- `< 1.0` — attenuate
+- `> 1.0` — push above the conventional `[0, 1]` range. Downstream consumers must accept this; UI bars cosmetically clamp at `1.0` but the wire payload is unclamped. The track tints orange→red as a warning.">master gain <input type="range" id="autoscale-master" min="50" max="150" step="1" /> <span id="autoscale-master-val"></span></label>
+          <label title="**Strength.** Blend between *equalized* output (everything looks similar in level) and *honest* output (raw dB / RMS readout).
+
+- `100%` → full per-bin / per-band auto-normalization. Quiet content looks as prominent as loud content. Best for visualizers and reactive features that should always look 'alive'.
+- `0%` → unprocessed readout. The FFT shows true level differences across frequency; L/M/H reflects raw band energy.
+- In-between → partial equalization.
+
+Drives both the L/M/H output and the FFT visualizer.">strength <input type="range" id="autoscale-strength" min="0" max="100" step="1" /> <span id="autoscale-strength-val"></span></label>
+          <label title="**Noise gate.** Anything below this RMS is treated as silence — the auto-scaler won't try to amplify it.
+
+Without a gate, the auto-scaler would happily normalize background hiss up to full scale during quiet passages.
+
+- Shown in `dBFS` (digital full-scale reference)
+- Applied to both L/M/H and FFT bins
+- Bins below the floor pin to the chart bottom (no disappearing bars)">noise gate <input type="range" id="autoscale-floor" min="0" max="1000" step="1" /> <span id="autoscale-floor-val"></span></label>
+          <label title="**Attack time.** How fast the auto-scaler locks into a *rising* signal.
+
+This sets how quickly it reacts when the input gets suddenly louder.
+
+- Smaller (`5–20 ms`) → snappy. Transients lock in immediately; the auto-scale catches up to a sudden loud passage almost instantly.
+- Larger → damped. New peaks are absorbed gradually, less reactive to sudden level changes.
+
+Drives both the L/M/H and the FFT per-bin auto-scaler.">attack (ms) <input type="range" id="autoscale-attack" min="1" max="500" step="1" data-log="1" /> <span id="autoscale-attack-val"></span></label>
+          <label title="**Release time.** How fast the auto-scaler locks into a *falling* signal — the **rolling memory** of the auto-rescaler.
+
+The tracked peak decays over this time constant. Once it has decayed below the current signal, the new value becomes the peak.
+
+- Longer (`60–300 s`) → stable view across long passages. A loud chorus won't make the following quiet verse vanish.
+- Shorter (`10–30 s`) → faster adaptation. The visualizer constantly rescales to whatever is loud right now (more dynamic, but compresses the contrast between loud and quiet sections).
+- Snaps to multiples of `10 s`
+
+Drives both the L/M/H and the FFT per-bin auto-scaler.">release (s) <input type="range" id="autoscale-tau" min="10" max="300" step="1" data-log="1" /> <span id="autoscale-tau-val"></span></label>
+          <label title="**Spectral tilt.** Tilts the gate and auto-scaler across frequency: `+N dB/oct` above 1 kHz, `−N dB/oct` below.
+
+Most music has far more energy in the lows than the highs (the `1/f` / pink-noise shape). Without tilt, bass dominates and the high end sits permanently below the gate. Tilting brings them back to parity.
+
+Typical values:
+
+- `0` → flat, honest dB / single global gate
+- `~3` → pink-noise compensation. Most music feels balanced across the spectrum.
+- higher → push more high-end through the gate
+
+Affects both pipelines: shifts the wire dB on the FFT side; derives a per-band noise floor from each band's geometric center on the L/M/H side, so the same global gate fires uniformly across frequency.">tilt (dB/oct) <input type="range" id="fft-tilt" min="-60" max="120" step="1" /> <span id="fft-tilt-val"></span></label>
+          <label title="**FFT-only.** Spatial smear of the per-bin auto-scaler (Gaussian, width in **octaves** of frequency).
+
+Without smear, a sustained pure tone (a single bin holding a high value) normalizes *itself* down to nothing — it becomes its own peak and divides itself out, ending up looking smaller than its quiet neighbors.
+
+Smearing the peak across nearby bins fixes this: the tone now competes against its spectral surroundings instead of just itself, so it reads as a real spike against the spectrum.
+
+- `0` → each bin self-normalizes; sustained tones vanish
+- `~0.3 oct` (default) → tones survive while broadband shape is still equalized
+- Higher → more local frequency contour preserved, less global flattening
+
+*L/M/H has no spectral context, so this only affects the FFT.*">smear (oct) <input type="range" id="fft-peak-smear" min="0" max="200" step="1" /> <span id="fft-peak-smear-val"></span></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Bandpass filter</legend>
+          <label title="**Butterworth bandpass order** for all three L/M/H bands.
+
+Each step adds biquads per band (one biquad per order step per band: 6 total at order 2, 12 at order 4). CPU scales linearly. The output is RMS-integrated, so steeper skirts buy very little visible — order 2 (~12 dB/oct) is plenty for envelope/beat work and is the recommended default on slower hardware (e.g. Raspberry Pi). Order 4 (~24 dB/oct) is for tighter band isolation when you can spare the CPU.">order <input type="range" id="filter-order" min="2" max="4" step="2" /> <span id="filter-order-val"></span></label>
+        </fieldset>
+
+        <fieldset>
+          <legend title="**Smoothing — attack side.**
+
+How fast the smoothed value *responds to a rising signal*. This determines how sharply transients (kicks, snares, hi-hats, vocal consonants) register in the feature stream.
+
+What this means in audio terms:
+
+- **Smaller** (`1–10 ms`) → onsets pass through almost instantly. Kicks and snares read as sharp spikes; the feature locks onto **the beat**. Best for rhythmic / beat-reactive visualizers.
+- **Larger** (`50+ ms`) → onsets get smoothed; output behaves more like a symmetric averager. Better for a 'loudness contour' feel, worse for rhythmic sync.
+
+Setting **attack ≪ release** is what makes the feature track the beat rather than the harmonic flutter inside held notes.
+
+Per-band τ also drives the FFT-bin smoother (log-interpolated from the L/M/H band centers).">Smoothing attack τ (ms)</legend>
+          <label title="**LOW band attack.**
+
+Catches the rising edge of kick / sub events. `~10–20 ms` is a sweet spot — long enough to ignore pre-ringing, short enough to read as 'on the beat'.">low <input type="range" id="tau-attack-low"  min="1" max="200" step="1" data-log="1" /> <span id="tau-attack-low-val"></span></label>
+          <label title="**MID band attack.**
+
+Catches snare snap and vocal consonants. `~3–5 ms` is typical — fast enough that each hit registers as a distinct percussive event.">mid <input type="range" id="tau-attack-mid"  min="1" max="200" step="1" data-log="1" /> <span id="tau-attack-mid-val"></span></label>
+          <label title="**HIGH band attack.**
+
+Catches hat / cymbal / sibilance onsets. `~3 ms or less` — these events are short and need to register sharply or they'll get blurred into the surrounding sizzle.">high <input type="range" id="tau-attack-high" min="1" max="200" step="1" data-log="1" /> <span id="tau-attack-high-val"></span></label>
+        </fieldset>
+
+        <fieldset>
+          <legend title="**Smoothing — release side.**
+
+How fast the smoothed value *decays* after a peak. This is the dominant source of trailing latency in the L/M/H feature stream and FFT bins.
+
+What this means in audio terms:
+
+- **Larger** → output looks smoother, more 'flowing'. Harmonic flutter inside a held note is averaged out. Good for ambient features and mood-style visualizers.
+- **Smaller** → output is twitchier, follows individual cycles more closely. Good for percussive / rhythmic features where you want energy to drop fast between hits so each hit reads as distinct.
+
+The matching attack-τ knobs above control how fast onsets pass through. Setting **release ≫ attack** is the classic percussion shape: fast hit, slow tail.
+
+Per-band τ also drives the FFT-bin smoother (log-interpolated from the L/M/H band centers).">Smoothing release τ (ms)</legend>
+          <label title="**LOW band release.**
+
+Larger → smooths sustained bass; kick body and bass notes blur into a flowing envelope. Smaller → each kick decays sharply, distinct hits stay separated.
+
+Falling-edge τ only — onsets are governed by the attack-τ slider above.">low <input type="range" id="tau-low"  min="5" max="2000" step="1" data-log="1" /> <span id="tau-low-val"></span></label>
+          <label title="**MID band release.**
+
+Larger → smooths sustained voice and snare body into a held envelope. Smaller → consonants and snare hits decay quickly, transients stay punchy.
+
+Falling-edge τ only — onsets are governed by the attack-τ slider above.">mid <input type="range" id="tau-mid"  min="5" max="2000" step="1" data-log="1" /> <span id="tau-mid-val"></span></label>
+          <label title="**HIGH band release.**
+
+Larger → hat / cymbal sizzle averages into a continuous shimmer. Smaller → each cymbal strike fades fast, individual hi-hat hits remain crisp.
+
+Falling-edge τ only — onsets are governed by the attack-τ slider above.">high <input type="range" id="tau-high" min="5" max="2000" step="1" data-log="1" /> <span id="tau-high-val"></span></label>
+        </fieldset>
+
+        <fieldset id="fieldset-onset">
+          <legend title="**Onset detection (per band).**
+
+Three independent server-side onset detectors run on the post-processed `low` / `mid` / `high` signals (the same values you see on the bars / lines viz). Each fires a single `1` pulse on each detected transient — sent over OSC as `/audio/onset/low`, `/audio/onset/mid`, `/audio/onset/high` (only on onsets, no `0` filler), and as `low_onset`/`mid_onset`/`high_onset` in the WS snapshot.
+
+The BPM readout in the page title is derived from the **low** onset stream only.
+
+Tune in two stages:
+
+1. **Shape the band's signal first.** The detector rides whatever that band looks like — bandpass edges, smoothing τ, autoscaler strength, noise gate all shape its input. Aim for a signal that visibly pulses on each transient (kick / snare / hat) with a clean fall between hits.
+2. **Pick a band** with the selector below and dial these knobs for that band's trigger sensitivity / debounce / transient shape. Each band has its own three parameters.">Onset detection</legend>
+          <div class="onset-band-select" role="tablist" aria-label="Onset band">
+            <button type="button" data-band="low"  class="onset-band-btn active" role="tab" aria-selected="true">low</button>
+            <button type="button" data-band="mid"  class="onset-band-btn" role="tab" aria-selected="false">mid</button>
+            <button type="button" data-band="high" class="onset-band-btn" role="tab" aria-selected="false">high</button>
+          </div>
+          <label title="**Sensitivity** — how much louder a hit must be than the recent background to count as a beat.
+
+Multiplier on a rolling average of recent activity in this band. A value of `2.0` means a hit needs to be at least twice as 'energetic' as what's been happening lately to fire.
+
+- **Lower** (`1.1–1.5`) → more triggers. Catches softer hits, but also more false fires on flutter / noise.
+- **`1.8`** → good default for most percussion-driven music.
+- **Higher** (`2.5–4.0`) → stricter. Only the strongest hits fire.
+- Crank up to `10.0` for ambient / noisy material where even `4.0` still produces stray triggers.">sensitivity <input type="range" id="onset-sensitivity" min="105" max="1000" step="5" /> <span id="onset-sensitivity-val"></span></label>
+          <label title="**Cooldown** — minimum gap between two triggers in this band.
+
+Once a hit fires, the detector ignores everything until this much time has passed. Stops one drum hit from registering as two.
+
+- **Shorter** (`100–150 ms`) → catches fast patterns like hi-hat 16ths (at 120 BPM, 16ths are ~125 ms apart, so cooldown must be ≤ 120 ms).
+- **Longer** (`350–500 ms`) → safer for messy material; guarantees at most one trigger per beat at moderate tempos, but misses fast subdivisions.
+- Typical: kick ~250 ms, snare ~180 ms, hat ~120 ms.">cooldown <input type="range" id="onset-refractory" min="50" max="600" step="5" /> <span id="onset-refractory-val"></span></label>
+          <label title="**Baseline window** — how far back the detector looks when deciding what counts as 'normal background level' for this band.
+
+The detector compares the *current* level to a *baseline* level. Anything rising faster than the baseline can keep up = a hit. This window controls how slowly the baseline reacts.
+
+- **Longer** (`500–1000 ms`) → baseline reacts slowly, so even gradual swells start to look like hits. Use for songs with slow build-ups or sustained sounds.
+- **Shorter** (`100–200 ms`) → baseline reacts quickly to keep up with the music, so only really sharp snaps stand out. Best for tight kick / snare detection.
+- Typical: kick ~300 ms, snare ~200 ms, hat ~150 ms.">baseline window <input type="range" id="onset-slow-tau" min="50" max="1000" step="10" data-log="1" /> <span id="onset-slow-tau-val"></span></label>
+          <label title="**Min jump** — absolute minimum 'jump' size needed to fire a trigger, regardless of sensitivity. (Not the same as the Auto-scaler's *noise gate*, which gates the signal itself; this only gates the onset detector. Wire field: `abs_floor`.)
+
+Sensitivity is *relative* (how much louder than the background). When the music is quiet, 'twice the background' might still be just room noise. This sets a hard floor underneath: anything smaller is treated as noise no matter what.
+
+The single best knob for rejecting false triggers in quiet passages or noisy rooms.
+
+The band signal lives in `[0, 1]`; real percussive hits typically jump by `0.2–0.5+`.
+
+- **Lower** (`0.02–0.05`) → very permissive; catches soft hits but also fires on room noise.
+- **`0.10`** → default. Rejects most noise-floor flutter while keeping real hits.
+- **Higher** (`0.15–0.30`) → strict; only clearly louder-than-background hits fire. For noisy environments or when only the loudest beats should drive visuals.">min jump <input type="range" id="onset-abs-floor" min="0" max="50" step="1" /> <span id="onset-abs-floor-val"></span></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Presets</legend>
+          <div class="row">
+            <input type="text" id="preset-name" placeholder="preset name" maxlength="64" aria-label="New preset name" autocomplete="off" spellcheck="false" />
+            <button id="preset-save">save</button>
+          </div>
+          <div class="row">
+            <select id="preset-list" aria-label="Saved presets"></select>
+            <button id="preset-load">load</button>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend title="**Live timing** for each stage of the audio → visualization pipeline.
+
+Each row shows **avg / p95 ms** per tick, plus a load bar (% of that stage's time budget). Bar turns **amber ≥ 50%**, **red ≥ 80%**.
+
+# Server stages
+- `cb` — PortAudio callback (per audio block)
+- `dsp` — L/M/H IIR + RMS + smoother + auto-scaler
+- `fft` — windowed FFT + log-bin + per-bin post-processing
+- `ws` — WebSocket broadcast
+
+# Browser stages
+- `raf` — inter-draw interval vs target fps
+- `lines / bars / scene / fft` — per-canvas paint cost
+
+# Counters
+
+Should all stay `0` in normal operation:
+
+- `cb_overruns` — audio callback overruns (xruns)
+- `dsp_drops` / `fft_drops` — blocks the worker couldn't keep up with">Performance</legend>
+          <div id="perf-rows"></div>
+          <div class="counters">
+            <span>cb_overruns: <b id="cb_overruns">0</b></span>
+            <span>dsp_drops: <b id="dsp_drops">0</b></span>
+            <span>fft_drops: <b id="fft_drops">0</b></span>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Errors</legend>
+          <div id="err-log" class="err-log" role="log" aria-live="off"></div>
+        </fieldset>
+      </aside>
+
+      <button class="controls-collapse-btn" id="controls-collapse" type="button" title="Collapse side panel" aria-label="Collapse side panel">›</button>
+      <button class="controls-expand-btn" id="controls-expand" type="button" title="Expand side panel" aria-label="Expand side panel">‹</button>
+    </main>
+
+    <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+
+    <script type="module" src="src/main.js"></script>
+  </body>
+</html>
