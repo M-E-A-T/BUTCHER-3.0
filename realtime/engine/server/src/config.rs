@@ -25,6 +25,15 @@ pub struct AudioCfg {
     pub device: DeviceCfg,
     pub blocksize: usize,
     pub channels: i64,
+    /// Pre-DSP input gain in dB, applied to the raw samples in the audio
+    /// callback (optional in YAML, default 0; omitted when 0 so files stay
+    /// identical to the reference's).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub input_gain_db: f64,
+}
+
+fn is_zero(x: &f64) -> bool {
+    *x == 0.0
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq)]
@@ -144,6 +153,18 @@ pub struct OscDest {
 pub struct OscCfg {
     pub destinations: Vec<OscDest>,
     pub send_fft: bool,
+    /// Optional: also send (unicast) to every host of an Ansible inventory
+    /// group; re-read when the file changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<InventoryCfg>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct InventoryCfg {
+    /// INI inventory path, relative to the config file's directory.
+    pub path: String,
+    pub group: String,
+    pub port: i64,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -298,6 +319,10 @@ fn build_config(d: &Value) -> Result<Config, BuildErr> {
         device: DeviceCfg { name, index },
         blocksize,
         channels: py::py_int(req(a, "channels")?)?,
+        input_gain_db: match opt(a, "input_gain_db")? {
+            None | Some(Value::Null) => 0.0,
+            x => v::validate_input_gain_db(x).map_err(BuildErr::Invalid)?,
+        },
     };
 
     let ds = req(d, "dsp")?;
@@ -397,7 +422,15 @@ fn build_config(d: &Value) -> Result<Config, BuildErr> {
             port: py::py_int(req(x, "port")?)?,
         });
     }
-    let osc = OscCfg { destinations, send_fft: py::truthy(req(od, "send_fft")?) };
+    let inventory = match opt(od, "inventory")? {
+        None | Some(Value::Null) => None,
+        Some(inv) => Some(InventoryCfg {
+            path: py::py_str(req(inv, "path")?),
+            group: py::py_str(req(inv, "group")?),
+            port: py::py_int(req(inv, "port")?)?,
+        }),
+    };
+    let osc = OscCfg { destinations, send_fft: py::truthy(req(od, "send_fft")?), inventory };
 
     let wd = req(d, "ws")?;
     let ws = WsCfg {

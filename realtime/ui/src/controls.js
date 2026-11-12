@@ -220,6 +220,18 @@ export function setupControls() {
     send: (v, commit) => send({ type: "set_autoscale", master_gain: v, commit }),
   });
 
+  const inputGainEl = $("input-gain");
+  const inputGainCtl = bindSlider(inputGainEl, $("input-gain-val"), {
+    toValue: (el) => parseFloat(el.value),
+    toSlider: (v) => v,
+    fmt: (v) => `${v > 0 ? "+" : ""}${v.toFixed(1)} dB`,
+    send: (v, commit) => send({ type: "set_input_gain", input_gain_db: v, commit }),
+  });
+  inputGainEl.addEventListener("dblclick", () => {
+    inputGainCtl.setValue(0, true);
+    send({ type: "set_input_gain", input_gain_db: 0, commit: true });
+  });
+
   const strengthCtl = bindSlider($("autoscale-strength"), $("autoscale-strength-val"), {
     toValue: (el) => parseFloat(el.value) / 100,
     toSlider: (v) => Math.round(v * 100),
@@ -529,6 +541,7 @@ export function setupControls() {
     floorCtl.setValue(as.noise_floor || 0, force);
     strengthCtl.setValue(as.strength ?? 1.0, force);
     masterCtl.setValue(as.master_gain ?? 1.0, force);
+    inputGainCtl.setValue(m.input_gain_db ?? 0, force);
     wsCtl.setValue(m.ws_snapshot_hz || 60, force);
     peakDecayCtl.setValue(m.ui_peak_decay_per_s ?? 0.6, force);
     if (m.ui_show_onsets !== undefined) {

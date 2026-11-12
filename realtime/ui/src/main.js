@@ -5,6 +5,7 @@ import { store, avgRing, p95Ring, clearLive } from "./store.js";
 import { setupControls } from "./controls.js";
 import { makeLines } from "./viz/lmh_lines.js";
 import { makeBars }  from "./viz/lmh_bars.js";
+import { makeOnsetBars } from "./viz/onset_bars.js";
 import { makeScene } from "./viz/lmh_scene.js";
 import { makeFft }   from "./viz/fft_2d.js";
 import { makeFft3d } from "./viz/fft_3d.js";
@@ -20,6 +21,7 @@ const controls = setupControls();
 
 const lines = makeLines(document.getElementById("viz-lines"));
 const bars  = makeBars(document.getElementById("viz-bars"));
+const onsetBars = makeOnsetBars(document.getElementById("viz-onsets"));
 const scene = makeScene(document.getElementById("viz-scene"));
 // The FFT card has one canvas and two renderers; store.fft_view picks which
 // one draws. The 3D one records history from every frame on arrival.
@@ -404,6 +406,7 @@ function frame(now) {
       offlineFramePainted = store.conn !== "connected";
       lines.draw();
       bars.draw();
+      onsetBars.draw();
       scene.draw();
       if (store.fft_view === "3d") fft3d.draw();
       else { fft3d.hide(); fft.draw(); }

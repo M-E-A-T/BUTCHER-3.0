@@ -6,6 +6,7 @@ mod audio;
 mod config;
 mod dispatcher;
 mod http;
+mod inventory;
 mod osc;
 mod persist;
 mod priority;

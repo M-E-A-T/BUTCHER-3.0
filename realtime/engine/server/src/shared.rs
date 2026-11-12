@@ -17,6 +17,10 @@ pub fn now_ns() -> u64 {
 }
 
 /// An f64 stored as bits in an `AtomicU64`.
+pub fn db_to_lin(db: f64) -> f64 {
+    10f64.powf(db / 20.0)
+}
+
 pub struct AtomicF64(AtomicU64);
 
 impl AtomicF64 {
@@ -119,6 +123,8 @@ pub struct Shared {
     pub send_fft: AtomicBool,
     pub send_raw_db: AtomicBool,
     pub master_gain: AtomicF64,
+    /// Linear pre-DSP input gain (from `audio.input_gain_db`).
+    pub input_gain: AtomicF64,
     pub db_floor: AtomicF64,
     pub stop: AtomicBool,
     /// The ring `write_idx` at which the FFT worker next has a full hop to
@@ -142,6 +148,7 @@ impl Shared {
             send_fft: AtomicBool::new(cfg.osc.send_fft),
             send_raw_db: AtomicBool::new(cfg.fft.send_raw_db),
             master_gain: AtomicF64::new(cfg.autoscale.master_gain),
+            input_gain: AtomicF64::new(db_to_lin(cfg.audio.input_gain_db)),
             db_floor: AtomicF64::new(cfg.fft.db_floor),
             stop: AtomicBool::new(false),
             fft_wake_at: AtomicU64::new(0),

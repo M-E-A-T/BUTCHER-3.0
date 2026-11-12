@@ -62,6 +62,7 @@ impl App {
             "set_band" => self.h_set_band(msg),
             "set_smoothing" => self.h_set_smoothing(msg),
             "set_autoscale" => self.h_set_autoscale(msg),
+            "set_input_gain" => self.h_set_input_gain(msg),
             "list_devices" => self.h_list_devices(msg, client_id),
             "set_device" => self.h_set_device(msg),
             "set_n_fft_bins" => self.h_set_n_fft_bins(msg),
@@ -252,6 +253,15 @@ impl App {
             );
         }
         self.apply_onset(band, &ok);
+        self.persister.request(commit);
+        self.meta_changed()
+    }
+
+    fn h_set_input_gain(&mut self, msg: &Value) -> HRes {
+        let commit = get_bool(msg, "commit", true);
+        let db = v::validate_input_gain_db(get(msg, "input_gain_db"))?;
+        self.cfg.audio.input_gain_db = db;
+        self.shared.input_gain.store(crate::shared::db_to_lin(db));
         self.persister.request(commit);
         self.meta_changed()
     }

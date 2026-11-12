@@ -4,7 +4,11 @@
 //! loop (meta, silence). Hot-path sends never allocate; send errors are
 //! swallowed (logged at DEBUG).
 
-use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs, UdpSocket};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+/// Most destinations the sender holds (static + inventory hosts).
+pub const MAX_DESTS: usize = 64;
 
 /// "/audio/lmh ,fff <f><f><f>": address 12 B, tags 8 B, floats at 20. 32 B.
 pub const LMH_TEMPLATE: [u8; 32] = *b"/audio/lmh\0\0,fff\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
@@ -24,32 +28,58 @@ const FFT_ADDR_FIELD: &[u8; 12] = b"/audio/fft\0\0";
 pub const MAX_FFT_PACKET: usize =
     crate::validate::osc_fft_packet_bytes(crate::validate::MAX_N_FFT_BINS);
 
+/// Destinations live in a fixed table of packed IPv4 `ip << 16 | port`
+/// words so the control loop can swap them (inventory reload) while the
+/// workers send: no locks, no allocation on the hot path. A send racing a
+/// swap may reach one old or one new address for that packet — harmless.
 pub struct OscSender {
     sock: Option<UdpSocket>,
-    addrs: Vec<SocketAddr>,
+    addrs: [AtomicU64; MAX_DESTS],
+    n: AtomicUsize,
+}
+
+fn pack(a: SocketAddrV4) -> u64 {
+    ((u32::from(*a.ip()) as u64) << 16) | a.port() as u64
+}
+
+fn unpack(w: u64) -> SocketAddr {
+    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from((w >> 16) as u32), w as u16))
+}
+
+/// Resolve `(host, port)` to IPv4; unresolvable / invalid ones are skipped
+/// with a warning.
+pub fn resolve_dests(dests: &[crate::config::OscDest]) -> Vec<SocketAddrV4> {
+    let mut out = Vec::new();
+    for d in dests {
+        let port = match u16::try_from(d.port) {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!("osc destination {}:{} has an invalid port; skipped", d.host, d.port);
+                continue;
+            }
+        };
+        match (d.host.as_str(), port).to_socket_addrs() {
+            Ok(it) => match it.into_iter().find_map(|a| match a {
+                SocketAddr::V4(v4) => Some(v4),
+                _ => None,
+            }) {
+                Some(a) => {
+                    if !out.contains(&a) {
+                        out.push(a)
+                    }
+                }
+                None => tracing::warn!("osc destination {}:{} has no IPv4 address; skipped", d.host, port),
+            },
+            Err(e) => tracing::warn!("osc destination {}:{} unresolvable ({e}); skipped", d.host, port),
+        }
+    }
+    out
 }
 
 impl OscSender {
     /// Resolve every destination once (IPv4, like the reference's AF_INET
     /// socket). An unresolvable destination is skipped with a warning.
     pub fn new(dests: &[crate::config::OscDest]) -> Self {
-        let mut addrs = Vec::new();
-        for d in dests {
-            let port = match u16::try_from(d.port) {
-                Ok(p) => p,
-                Err(_) => {
-                    tracing::warn!("osc destination {}:{} has an invalid port; skipped", d.host, d.port);
-                    continue;
-                }
-            };
-            match (d.host.as_str(), port).to_socket_addrs() {
-                Ok(it) => match it.into_iter().find(|a| a.is_ipv4()) {
-                    Some(a) => addrs.push(a),
-                    None => tracing::warn!("osc destination {}:{} has no IPv4 address; skipped", d.host, port),
-                },
-                Err(e) => tracing::warn!("osc destination {}:{} unresolvable ({e}); skipped", d.host, port),
-            }
-        }
         // SO_BROADCAST so a subnet broadcast destination (e.g. 10.10.10.255)
         // works; without it the kernel rejects those sends with EACCES.
         // Harmless for unicast destinations. (Rust-only; the Python
@@ -59,13 +89,37 @@ impl OscSender {
             .and_then(|s| s.set_broadcast(true).map(|_| s))
             .map_err(|e| tracing::warn!("osc socket unavailable: {e}"))
             .ok();
-        OscSender { sock, addrs }
+        let s = OscSender { sock, addrs: std::array::from_fn(|_| AtomicU64::new(0)), n: AtomicUsize::new(0) };
+        s.set_destinations(&resolve_dests(dests));
+        s
+    }
+
+    /// Replace the destination list (control loop only). Extra entries past
+    /// `MAX_DESTS` are dropped with a warning.
+    pub fn set_destinations(&self, list: &[SocketAddrV4]) {
+        if list.len() > MAX_DESTS {
+            tracing::warn!("osc: {} destinations, only the first {MAX_DESTS} are used", list.len());
+        }
+        let list = &list[..list.len().min(MAX_DESTS)];
+        // Shrink the visible count first, write, then publish the new count.
+        self.n.store(self.n.load(Ordering::Relaxed).min(list.len()), Ordering::Release);
+        for (slot, a) in self.addrs.iter().zip(list) {
+            slot.store(pack(*a), Ordering::Relaxed);
+        }
+        self.n.store(list.len(), Ordering::Release);
+    }
+
+    pub fn destinations(&self) -> Vec<SocketAddr> {
+        let n = self.n.load(Ordering::Acquire);
+        self.addrs[..n].iter().map(|w| unpack(w.load(Ordering::Relaxed))).collect()
     }
 
     #[inline]
     pub fn send(&self, pkt: &[u8]) {
         let Some(sock) = &self.sock else { return };
-        for a in &self.addrs {
+        let n = self.n.load(Ordering::Acquire);
+        for w in &self.addrs[..n] {
+            let a = unpack(w.load(Ordering::Relaxed));
             if let Err(e) = sock.send_to(pkt, a)
                 && tracing::enabled!(tracing::Level::DEBUG)
             {
@@ -241,7 +295,7 @@ mod tests {
 
     #[test]
     fn fft_values() {
-        let osc = OscSender { sock: None, addrs: vec![] };
+        let osc = OscSender { sock: None, addrs: std::array::from_fn(|_| AtomicU64::new(0)), n: AtomicUsize::new(0) };
         let mut f = FftPacker::default();
         f.send_raw_db(&osc, &[-1000.0, -50.0, -95.0], -90.0);
         let pk = f.packet();
@@ -253,5 +307,20 @@ mod tests {
         assert_eq!(pk.len(), osc_fft_len(2));
         let p = pk.len() - 8;
         assert_eq!(f32::from_be_bytes(pk[p..p + 4].try_into().unwrap()), 1.0);
+    }
+}
+
+#[cfg(test)]
+mod dest_tests {
+    use super::*;
+    use crate::config::OscDest;
+
+    #[test]
+    fn destinations_swap_and_dedup() {
+        let d = |h: &str| OscDest { host: h.into(), port: 9000 };
+        let s = OscSender::new(&[d("127.0.0.1"), d("10.1.2.3"), d("127.0.0.1")]);
+        assert_eq!(s.destinations().len(), 2);
+        s.set_destinations(&resolve_dests(&[d("10.9.9.9")]));
+        assert_eq!(s.destinations(), vec!["10.9.9.9:9000".parse::<SocketAddr>().unwrap()]);
     }
 }

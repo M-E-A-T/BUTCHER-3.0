@@ -93,6 +93,7 @@ Shows / hides the three colored squares above the L/M/H bars that flash on each 
 
 Off by default — turn on when actively tuning onset parameters or driving the UI itself from the band triggers."><input type="checkbox" id="show-onsets" /> onsets</label></span></div>
           <canvas id="viz-bars" width="320" height="200" role="img" aria-label="Band energy bars: low, mid, high"></canvas>
+          <canvas id="viz-onsets" class="viz-onsets" width="320" height="80" role="img" aria-label="Onset state per band: 1 on onset, dash otherwise" title="**Onsets per band.** Shows `1` (filled) when `/audio/onset/low|mid|high` fires, `–` otherwise. Each onset is held on screen for 120 ms so single-block pulses are visible."></canvas>
         </div>
         <div class="viz-card" data-card="lines">
           <div class="viz-title"><span title="**L/M/H output — sent over OSC.**
@@ -196,6 +197,13 @@ Use after plugging / unplugging a device. PortAudio only sees new devices after 
 Devices that saw audio during the probe get a ★.
 
 *Slower than refresh, and momentarily grabs each device — use sparingly.*">probe</button>
+          <label title="**Input gain.** Boosts or cuts the raw input *before* any analysis (bands, onsets, BPM, FFT).
+
+- `0 dB` (default) — unchanged
+- `+` — boost a quiet feed so it clears the noise floor and onset thresholds
+- `−` — tame a hot feed
+
+Double-click to reset to 0 dB.">input gain <input type="range" id="input-gain" min="-24" max="36" step="0.5" /> <span id="input-gain-val"></span></label>
         </fieldset>
 
         <fieldset id="fieldset-bandpass">

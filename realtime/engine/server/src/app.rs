@@ -209,6 +209,8 @@ pub struct App {
     /// until it's done, like the reference's lock queue.
     pub switch_busy: bool,
     deferred: std::collections::VecDeque<(u64, String)>,
+    /// `osc.inventory` watcher (unicast destinations from an Ansible group).
+    inventory: Option<crate::inventory::InventoryWatch>,
     pub events_tx: mpsc::UnboundedSender<Event>,
     ws_listener: Option<std::net::TcpListener>,
     http_listener: Option<std::net::TcpListener>,
@@ -235,6 +237,7 @@ impl App {
         let osc = OscSender::new(&cfg.osc.destinations);
         let shared = Arc::new(Shared::new(ring, osc, &cfg));
         let wake: WakeTargets = Arc::new(std::sync::OnceLock::new());
+        let inventory = cfg.osc.inventory.as_ref().map(|i| crate::inventory::InventoryWatch::new(i, &config_dir));
 
         let cli_dev = match args.device {
             Some(d) if d < 0 => {
@@ -293,11 +296,13 @@ impl App {
             wd: Watchdog { last_wi: 0, last_change: now, next_attempt: now, next_tick: now + WATCHDOG_TICK },
             switch_busy: false,
             deferred: Default::default(),
+            inventory,
             events_tx,
             ws_listener: None,
             http_listener: None,
             cfg,
         };
+        app.poll_inventory(now);
         app.send_osc_meta();
         app.persister.attach();
         if bands_clamped {
@@ -759,6 +764,7 @@ impl App {
             "tau": c.dsp.tau,
             "tau_attack": c.dsp.tau_attack,
             "filter_order": c.dsp.filter_order,
+            "input_gain_db": c.audio.input_gain_db,
             "autoscale": {
                 "tau_attack_s": c.autoscale.tau_attack_s,
                 "tau_release_s": c.autoscale.tau_release_s,
@@ -1227,7 +1233,22 @@ impl App {
 
     /// `_audio_watchdog_loop` body: no new block for 1 s → one warning,
     /// OSC silence, `audio_stalled`, then a reopen every 3 s.
+    /// Re-read the `osc.inventory` group if its file changed and swap the
+    /// OSC destination list to static destinations + those hosts.
+    fn poll_inventory(&mut self, now: Instant) {
+        let Some(inv) = self.inventory.as_mut() else { return };
+        let Some(hosts) = inv.poll(now) else { return };
+        let mut dests = self.cfg.osc.destinations.clone();
+        dests.extend(hosts);
+        let resolved = crate::osc::resolve_dests(&dests);
+        self.shared.osc.set_destinations(&resolved);
+        let list: Vec<String> = self.shared.osc.destinations().iter().map(|a| a.to_string()).collect();
+        tracing::info!("osc destinations ({}, from {}): {}", list.len(), inv.path.display(), list.join(", "));
+        self.osc_meta_dirty = true;
+    }
+
     fn watchdog_tick(&mut self, now: Instant) {
+        self.poll_inventory(now);
         if self.switch_busy {
             self.wd.last_change = now;
             return;

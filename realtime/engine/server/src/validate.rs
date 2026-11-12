@@ -217,6 +217,12 @@ pub fn validate_fft_tilt_db_per_oct(v: Option<&Value>) -> VResult<f64> {
     Ok(clamp(finite_float(v, "tilt_db_per_oct", None, None)?, FFT_TILT_RANGE))
 }
 
+pub const INPUT_GAIN_DB_RANGE: (f64, f64) = (-24.0, 36.0);
+
+pub fn validate_input_gain_db(v: Option<&Value>) -> VResult<f64> {
+    Ok(clamp(finite_float(v, "input_gain_db", None, None)?, INPUT_GAIN_DB_RANGE))
+}
+
 pub fn validate_peak_decay_per_s(v: Option<&Value>) -> VResult<f64> {
     Ok(clamp(finite_float(v, "peak_decay_per_s", None, None)?, PEAK_DECAY_RANGE))
 }

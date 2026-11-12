@@ -233,9 +233,10 @@ impl Callback {
             let t0 = now_ns();
             self.check_gap(info, data.len() / self.stride);
             let bs = self.acc.len();
+            let g = self.shared.input_gain.load() as f32;
             for frame in data.chunks_exact(self.stride) {
                 let x0 = frame[0].to_sample::<f32>();
-                self.acc[self.fill] = if self.mix2 { (x0 + frame[1].to_sample::<f32>()) * 0.5 } else { x0 };
+                self.acc[self.fill] = g * if self.mix2 { (x0 + frame[1].to_sample::<f32>()) * 0.5 } else { x0 };
                 self.fill += 1;
                 if self.fill == bs {
                     // Stamp the block the moment it becomes available.
