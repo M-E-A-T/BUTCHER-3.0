@@ -1,0 +1,31 @@
+---
+# Opens a full-screen terminal on every laptop showing the audio server's OSC
+# feed (bpm, onsets, low/mid/high) as received on UDP 9000.
+#   ansible-playbook -i config/hosts.ini showOscMonitor.yml
+#   ansible-playbook -i config/hosts.ini showOscMonitor.yml -e stop=true   # close them
+- name: Show OSC visualizer feed in a terminal
+  hosts: meat
+  gather_facts: no
+  vars:
+    script: "/home/{{ ansible_user }}/osc_monitor.py"
+    stop: false
+
+  tasks:
+    - name: Copy monitor script
+      ansible.builtin.copy:
+        src: files/osc_monitor.py
+        dest: "{{ script }}"
+        mode: "0755"
+      when: not stop | bool
+
+    - name: Close any monitor already running
+      ansible.builtin.shell: pkill -f "[o]sc_monitor.py" || true
+
+    - name: Open a terminal running the monitor
+      ansible.builtin.shell: |
+        export DISPLAY=:0
+        export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus
+        nohup gnome-terminal --full-screen --title="MEAT OSC" -- python3 {{ script }} >/dev/null 2>&1 &
+      args:
+        executable: /bin/bash
+      when: not stop | bool

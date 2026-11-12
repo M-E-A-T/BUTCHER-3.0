@@ -1,0 +1,10 @@
+# Runs the pyramid sketch on the stacked six-screen wall only (the [pyramid]
+# group in config/hosts.ini; positions live there). Same steps as
+# runPyramid.yml: stop anything in the way, compile, start all six screens on
+# the same second. Deploy first if the sketch changed (deployButcher.yml).
+#   ansible-playbook -i config/hosts.ini runPyramidWall.yml
+#   ansible-playbook -i config/hosts.ini runPyramidWall.yml -e stop=true   # stop it
+- name: Pyramid wall
+  ansible.builtin.import_playbook: runPyramid.yml
+  vars:
+    target: pyramid

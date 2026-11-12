@@ -1,8 +1,8 @@
 ---
 - name: Test connectivity with ping
   hosts: 
-    #- meat
-    - meat2
+    - meat
+    #- meat2
   gather_facts: no
 
   tasks:

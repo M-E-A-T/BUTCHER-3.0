@@ -1,0 +1,76 @@
+---
+# Installs Processing (portable build, bundled Java) into each user's home.
+# No sudo needed. Each laptop downloads the zip over its own internet connection.
+- name: Install Processing
+  hosts: meat
+  gather_facts: no
+  vars:
+    processing_version: "4.5.7"
+    processing_build: "1435"
+    zip_name: "processing-{{ processing_version }}-linux-x64-portable.zip"
+    zip_url: "https://github.com/processing/processing4/releases/download/processing-{{ processing_build }}-{{ processing_version }}/{{ zip_name }}"
+    zip_path: "/tmp/{{ zip_name }}"
+    install_dir: "/home/{{ ansible_user }}/processing-{{ processing_version }}"
+    exe: "{{ install_dir }}/Processing/bin/Processing"
+
+  tasks:
+    - name: Check for an existing install
+      ansible.builtin.stat:
+        path: "{{ exe }}"
+      register: installed
+
+    - name: Install if missing
+      when: not installed.stat.exists
+      block:
+        - name: Download Processing on the laptop
+          ansible.builtin.get_url:
+            url: "{{ zip_url }}"
+            dest: "{{ zip_path }}"
+            timeout: 120
+
+        - name: Make install folder
+          ansible.builtin.file:
+            path: "{{ install_dir }}"
+            state: directory
+
+        - name: Unzip Processing
+          ansible.builtin.unarchive:
+            src: "{{ zip_path }}"
+            dest: "{{ install_dir }}"
+            remote_src: true
+
+        - name: Remove downloaded zip
+          ansible.builtin.file:
+            path: "{{ zip_path }}"
+            state: absent
+
+    - name: Make ~/.local/bin
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/.local/bin"
+        state: directory
+
+    - name: Add 'processing' command
+      ansible.builtin.file:
+        src: "{{ exe }}"
+        dest: "/home/{{ ansible_user }}/.local/bin/processing"
+        state: link
+
+    - name: Make ~/.local/share/applications
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/.local/share/applications"
+        state: directory
+
+    - name: Add Processing to the app menu
+      ansible.builtin.copy:
+        dest: "/home/{{ ansible_user }}/.local/share/applications/processing.desktop"
+        mode: "0755"
+        content: |
+          [Desktop Entry]
+          Type=Application
+          Name=Processing
+          Comment=Processing {{ processing_version }}
+          Exec={{ exe }} %F
+          Icon={{ install_dir }}/Processing/lib/Processing.png
+          Terminal=false
+          Categories=Development;Graphics;
+          MimeType=text/x-processing;

@@ -1,0 +1,144 @@
+---
+# Sync every laptop's clock to this Mac with chrony, then relaunch the pyramid
+# sketch. The sketch animates from the wall clock, so with synced clocks every
+# screen shows the same frame at the same moment.
+#
+#   ansible-playbook -i config/hosts.ini clockSync.yml -K
+#
+# -K asks for the laptops' sudo password; the play also asks for this Mac's
+# sudo password (chronyd must run as root to serve NTP on port 123).
+# The Mac's address on the laptop network is detected automatically.
+
+- name: Mac = clock master (chronyd serving NTP, never adjusting the Mac's clock)
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars_prompt:
+    - name: mac_sudo_pass
+      prompt: "This Mac's sudo password"
+      private: true
+  vars:
+    ansible_become_password: "{{ mac_sudo_pass }}"
+    chronyd: /opt/homebrew/opt/chrony/sbin/chronyd
+    conf: /opt/homebrew/etc/chrony-master.conf
+    plist: /Library/LaunchDaemons/org.meat.chronyd.plist
+
+  tasks:
+    - name: Install chrony (Homebrew)
+      community.general.homebrew:
+        name: chrony
+        state: present
+
+    - name: Install the master config
+      ansible.builtin.copy:
+        src: config/chrony-master.conf
+        dest: "{{ conf }}"
+        mode: "0644"
+      register: conf_file
+
+    - name: Run chronyd at boot (launchd)
+      become: true
+      ansible.builtin.copy:
+        dest: "{{ plist }}"
+        owner: root
+        group: wheel
+        mode: "0644"
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>Label</key><string>org.meat.chronyd</string>
+            <key>ProgramArguments</key>
+            <array>
+              <string>{{ chronyd }}</string>
+              <string>-d</string>
+              <string>-x</string>
+              <string>-f</string>
+              <string>{{ conf }}</string>
+            </array>
+            <key>RunAtLoad</key><true/>
+            <key>KeepAlive</key><true/>
+            <key>StandardErrorPath</key><string>/var/log/meat-chronyd.log</string>
+          </dict>
+          </plist>
+      register: plist_file
+
+    - name: (Re)start chronyd
+      become: true
+      ansible.builtin.shell: |
+        launchctl bootout system/org.meat.chronyd 2>/dev/null || true
+        launchctl bootstrap system {{ plist }}
+      when: plist_file.changed or conf_file.changed
+
+    - name: Check it is serving on UDP 123
+      become: true
+      ansible.builtin.shell: lsof -nP -iUDP:123 | grep -q chronyd
+      register: serving
+      retries: 10
+      delay: 1
+      until: serving.rc == 0
+      changed_when: false
+
+    - name: Find this Mac's address on the laptop network
+      ansible.builtin.shell: |
+        ipconfig getifaddr "$(route get 10.10.10.255 | awk '/interface/{print $2}')"
+      register: master_ip
+      changed_when: false
+
+    - name: Share it with the laptop play
+      ansible.builtin.set_fact:
+        clock_master: "{{ master_ip.stdout }}"
+
+- name: Laptops = chrony clients of the Mac
+  hosts: meat
+  gather_facts: no
+  become: true
+  vars:
+    clock_master: "{{ hostvars['localhost'].clock_master }}"
+
+  tasks:
+    - name: Install chrony (replaces systemd-timesyncd)
+      ansible.builtin.apt:
+        name: chrony
+        state: present
+        update_cache: true
+        cache_valid_time: 86400
+
+    - name: Sync only to the Mac
+      ansible.builtin.copy:
+        dest: /etc/chrony/chrony.conf
+        mode: "0644"
+        content: |
+          # Managed by ansible/clockSync.yml: follow the Mac clock master only.
+          server {{ clock_master }} iburst prefer minpoll 0 maxpoll 4
+          # Step the clock if it's more than 0.5 s off (at any time); smaller
+          # errors are slewed smoothly so the visuals don't jump.
+          makestep 0.5 -1
+          driftfile /var/lib/chrony/chrony.drift
+          rtcsync
+      register: chrony_conf
+
+    - name: Restart chrony
+      ansible.builtin.systemd:
+        name: chrony
+        state: restarted
+        enabled: true
+      when: chrony_conf.changed
+
+    - name: Wait until synced (within 10 ms)
+      ansible.builtin.command: chronyc waitsync 60 0.01
+      changed_when: false
+
+    - name: Report offset to the Mac
+      ansible.builtin.shell: |
+        chronyc -n tracking | awk -F': ' '/Reference ID|System time|RMS offset/{printf "%s: %s | ", $1, $2}'
+      register: tracking
+      changed_when: false
+
+    - name: Show sync status
+      ansible.builtin.debug:
+        msg: "{{ tracking.stdout }}"
+
+- name: Relaunch the pyramid sketch (now on the synced clock)
+  ansible.builtin.import_playbook: runPyramid.yml

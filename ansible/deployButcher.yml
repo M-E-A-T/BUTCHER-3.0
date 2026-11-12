@@ -1,0 +1,23 @@
+---
+# Copies this BUTCHER-3.0 folder to ~/Desktop/BUTCHER-3.0/ on every laptop.
+#   ansible-playbook -i config/hosts.ini deployButcher.yml
+# Skips the Mac-only Rust build output and git metadata. Files deleted here
+# are deleted on the laptops too (only inside ~/Desktop/BUTCHER-3.0/).
+- name: Deploy BUTCHER-3.0
+  hosts: meat
+  gather_facts: no
+
+  tasks:
+    - name: Sync the project folder
+      ansible.posix.synchronize:
+        src: "{{ playbook_dir }}/../"
+        dest: "/home/{{ ansible_user }}/Desktop/BUTCHER-3.0/"
+        archive: true
+        compress: true
+        delete: true
+        rsync_opts:
+          - "--exclude=.git/"
+          - "--exclude=realtime/engine/target/"
+          - "--exclude=__pycache__/"
+          - "--exclude=.venv/"
+          - "--exclude=.DS_Store"

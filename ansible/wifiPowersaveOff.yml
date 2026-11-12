@@ -1,0 +1,33 @@
+---
+# Turns Wi-Fi power saving off on every laptop, now and across reboots.
+# Power save makes the radio doze between beacons: pings jump to 100-500 ms
+# and most OSC broadcast packets (lmh / bpm / onsets) never arrive.
+# Needs sudo:  ansible-playbook -i config/hosts.ini wifiPowersaveOff.yml -K
+- name: Disable Wi-Fi power save
+  hosts: meat
+  gather_facts: no
+  become: true
+
+  tasks:
+    - name: Persist powersave off for NetworkManager (2 = disable)
+      ansible.builtin.copy:
+        dest: /etc/NetworkManager/conf.d/default-wifi-powersave-on.conf
+        content: |
+          [connection]
+          wifi.powersave = 2
+        mode: "0644"
+
+    - name: Turn it off on the live interface (no reconnect)
+      ansible.builtin.shell: |
+        for dev in $(nmcli -t -f DEVICE,TYPE device | awk -F: '$2=="wifi"{print $1}'); do
+          iwconfig "$dev" power off 2>/dev/null || iw dev "$dev" set power_save off
+          echo "$dev: $(iwconfig "$dev" 2>/dev/null | grep -o 'Power Management:[a-z]*')"
+        done
+      args:
+        executable: /bin/bash
+      register: ps
+      changed_when: true
+
+    - name: Show result
+      ansible.builtin.debug:
+        msg: "{{ ps.stdout_lines }}"

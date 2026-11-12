@@ -1,0 +1,47 @@
+# Stops everything the show runs on the laptops: the pyramid sketch (and the
+# Processing launcher, older copies, the standalone fftcloud), the OSC monitor,
+# the NDI receivers, and anything else listening on the OSC port (UDP 9000).
+#   ansible-playbook -i config/hosts.ini killAll.yml                    # every laptop
+#   ansible-playbook -i config/hosts.ini killAll.yml -e target=pyramid  # just the wall
+# Leaves the desktop as is (screen blanking stays off until next login).
+- name: Kill everything
+  hosts: "{{ target | default('meat') }}"
+  gather_facts: no
+
+  tasks:
+    - name: Ask nicely
+      ansible.builtin.shell: |
+        # Processing sketches (launcher + sketch JVM carry the sketch path).
+        pkill -f "[D]esktop/BUTCHER-3.0/pyramid" || true
+        pkill -f "[D]esktop/BUTCHER-3.0/fftcloud" || true
+        pkill -f "[p]yramid-run/skyset" || true
+        pkill -f "[p]rocessing-4.5.7/Processing/bin/Processing cli" || true
+        # OSC monitor (showOscMonitor.yml) and NDI receivers (runNdiReceivers.yml).
+        pkill -f "[o]sc_monitor.py" || true
+        pkill -f "[N]DI2.py" || true
+        true
+      args:
+        executable: /bin/bash
+
+    - name: Force whatever is left, and free UDP 9000
+      ansible.builtin.shell: |
+        sleep 2
+        pkill -9 -f "[D]esktop/BUTCHER-3.0/pyramid" || true
+        pkill -9 -f "[D]esktop/BUTCHER-3.0/fftcloud" || true
+        pkill -9 -f "[o]sc_monitor.py" || true
+        pkill -9 -f "[N]DI2.py" || true
+        fuser -k -n udp 9000 2>/dev/null || true
+        true
+      args:
+        executable: /bin/bash
+
+    - name: Check nothing is left
+      ansible.builtin.shell: |
+        left=$(pgrep -fa "[D]esktop/BUTCHER-3.0/(pyramid|fftcloud)|[o]sc_monitor.py|[N]DI2.py" | cut -c1-80)
+        port=$(fuser -n udp 9000 2>/dev/null)
+        if [ -n "$left$port" ]; then echo "still running: $left $port"; exit 1; fi
+        echo clear
+      args:
+        executable: /bin/bash
+      register: check
+      changed_when: false

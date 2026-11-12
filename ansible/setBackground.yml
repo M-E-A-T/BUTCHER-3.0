@@ -1,0 +1,65 @@
+---
+# Puts background.png at /background.png on every laptop and uses it for the
+# desktop wallpaper, the screensaver/lock screen, and the login screen.
+# Needs sudo:  ansible-playbook -i config/hosts.ini setBackground.yml -K
+- name: Set the M.E.A.T. background everywhere
+  hosts: meat
+  gather_facts: no
+  vars:
+    bg_path: /background.png
+
+  tasks:
+    - name: Copy background image to the filesystem root
+      become: true
+      ansible.builtin.copy:
+        src: background.png
+        dest: "{{ bg_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Make it the system default wallpaper (any user, any new account)
+      become: true
+      ansible.builtin.copy:
+        dest: /usr/share/glib-2.0/schemas/zz_meat_background.gschema.override
+        content: |
+          [org.cinnamon.desktop.background]
+          picture-uri='file://{{ bg_path }}'
+          picture-options='scaled'
+          primary-color='#000000'
+
+          [org.cinnamon.desktop.screensaver]
+          screensaver-name=''
+        mode: "0644"
+      register: override
+
+    - name: Compile gsettings schemas
+      become: true
+      ansible.builtin.command: glib-compile-schemas /usr/share/glib-2.0/schemas/
+      when: override.changed
+
+    - name: Set wallpaper and screensaver for the logged-in user
+      ansible.builtin.shell: |
+        bus=/run/user/$(id -u)/bus
+        run() { if [ -S "$bus" ]; then DBUS_SESSION_BUS_ADDRESS=unix:path=$bus "$@"; else dbus-run-session -- "$@"; fi; }
+        run gsettings set org.cinnamon.desktop.background picture-uri 'file://{{ bg_path }}'
+        run gsettings set org.cinnamon.desktop.background picture-options 'scaled'
+        run gsettings set org.cinnamon.desktop.background primary-color '#000000'
+        # Empty screensaver-name = Cinnamon screensaver shows the wallpaper
+        run gsettings set org.cinnamon.desktop.screensaver screensaver-name ''
+      args:
+        executable: /bin/bash
+
+    - name: Use it on the login screen (slick-greeter)
+      become: true
+      community.general.ini_file:
+        path: /etc/lightdm/slick-greeter.conf
+        section: Greeter
+        option: "{{ item.key }}"
+        value: "{{ item.value }}"
+        mode: "0644"
+      loop:
+        - { key: background, value: "{{ bg_path }}" }
+        - { key: background-color, value: "#000000" }
+        - { key: draw-user-backgrounds, value: "false" }
+        - { key: draw-grid, value: "false" }

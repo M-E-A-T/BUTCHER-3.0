@@ -1,0 +1,127 @@
+# Runs the pyramid Processing sketch (pyramid/pyramid.pde) full screen on every
+# laptop, reacting to the audio server's OSC (/audio/lmh on UDP 9000).
+# Deploy first (deployButcher.yml) and close the OSC monitor (it also uses 9000).
+#   ansible-playbook -i config/hosts.ini runPyramid.yml
+#   ansible-playbook -i config/hosts.ini runPyramid.yml -e stop=true   # stop it
+#   ansible-playbook -i config/hosts.ini runPyramid.yml -e target=pyramid   # one group only
+# (runPyramidWall.yml = the pyramid group.)
+#
+# It starts by stopping everything that would fight it for the screen or for
+# UDP 9000: older copies of the sketch, the OSC monitor, the NDI receivers and
+# anything else listening on 9000.
+#
+# The slider window is skipped here (PYRAMID_NO_CONTROLS); the laptops use the
+# values saved in pyramid/params.json on the Mac.
+#
+# Low-CPU launch: the sketch is compiled once with `Processing cli --build` and
+# its JVM is started directly. `cli --present` would also keep the Processing
+# launcher JVM running and attach a Java debugger (jdwp) and assertions (-ea)
+# to the sketch. Cinnamon is also told to stop compositing full-screen windows
+# (unredirect), so the window goes straight to the screen without an extra copy.
+#
+# Span (stacked pyramid of screens): hosts with span_x / span_row in
+# config/hosts.ini (the [pyramid] group) each show one slice of a single picture, 3 screens wide x
+# 3 rows high. span_x is in screen widths from the left; the upper levels sit
+# centred over the gaps below:
+#     row 2:                    meat28 .128
+#     row 1:          meat-21 .121        meat08 .108
+#     row 0:  meat19 .119       meat09 .109        meat27 .127
+# All laptops start at the same wall-clock second (clocks synced to the Mac by
+# clockSync.yml / chrony); the animation also runs off that clock.
+#
+# Bezels: by default (B) the picture leaves out the strip hidden behind the
+# bezels between screens, so lines run straight across the gaps. The gap
+# sizes are estimates (Inspiron 3135: ~53 px per cm); tune them by eye, or
+# use A (ignore the gaps):
+#   ansible-playbook -i config/hosts.ini runPyramid.yml -e span_gap_x=170 -e span_gap_y=300
+#   ansible-playbook -i config/hosts.ini runPyramid.yml -e span_gaps=false   # A
+- name: Run the pyramid sketch
+  hosts: "{{ target | default('meat') }}"
+  gather_facts: no
+  vars:
+    sketch_dir: "/home/{{ ansible_user }}/Desktop/BUTCHER-3.0/pyramid"
+    build_dir: "/home/{{ ansible_user }}/pyramid-build"
+    processing: "/home/{{ ansible_user }}/processing-4.5.7/Processing/bin/Processing"
+    core_lib: "/home/{{ ansible_user }}/processing-4.5.7/Processing/lib/app/resources/core/library"
+    java: "/home/{{ ansible_user }}/processing-4.5.7/Processing/lib/app/resources/jdk/bin/java"
+    log: "/home/{{ ansible_user }}/pyramid.log"
+    stop: false
+    span_cols: 3
+    span_rows: 3
+    span_gaps: true
+    span_gap_x: 190    # px hidden between side-by-side screens (two side bezels)
+    span_gap_y: 250    # px hidden between the rows (bezels + hinge)
+
+  tasks:
+    - name: Stop anything the sketch needs (screen, UDP 9000)
+      ansible.builtin.shell: |
+        # Older copies of this sketch (Processing launcher + sketch JVM carry the path).
+        pkill -f "[D]esktop/BUTCHER-3.0/pyramid" || true
+        pkill -f "[p]yramid-run/skyset" || true
+        pkill -f "[D]esktop/BUTCHER-3.0/fftcloud" || true
+        # OSC monitor (showOscMonitor.yml) and NDI receivers: both hold the screen.
+        pkill -f "[o]sc_monitor.py" || true
+        pkill -f "[N]DI2.py" || true
+        sleep 1
+        # Anything else still listening on the OSC port.
+        fuser -k -n udp 9000 2>/dev/null || true
+        # Hard-kill whatever ignored the polite request.
+        pkill -9 -f "[D]esktop/BUTCHER-3.0/pyramid" || true
+        true
+      args:
+        executable: /bin/bash
+
+    - name: Stop compositing full-screen windows (Cinnamon)
+      when: not stop | bool
+      ansible.builtin.shell: |
+        export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus
+        gsettings set org.cinnamon.muffin unredirect-fullscreen-windows true
+      args:
+        executable: /bin/bash
+
+    - name: Compile the sketch
+      when: not stop | bool
+      ansible.builtin.shell: |
+        "{{ processing }}" cli --sketch="{{ sketch_dir }}" --output="{{ build_dir }}" --force --build
+        test -f "{{ build_dir }}/pyramid.class"
+      args:
+        executable: /bin/bash
+
+    # After every laptop has compiled (tasks run in step across hosts), so a
+    # slow compile can't miss the start.
+    - name: Pick a common start time (now + 25 s, Mac clock; covers ssh to every laptop)
+      when: not stop | bool
+      run_once: true
+      ansible.builtin.set_fact:
+        start_at: "{{ lookup('pipe', 'date +%s') | int + 25 }}"
+
+    - name: Launch on the laptop's screen
+      when: not stop | bool
+      ansible.builtin.shell: |
+        export DISPLAY=:0
+        export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus
+        export PYRAMID_NO_CONTROLS=1
+        {% if span_x is defined %}
+        export SPAN_COLS={{ span_cols }} SPAN_ROWS={{ span_rows }} SPAN_X={{ span_x }} SPAN_ROW={{ span_row }}
+        {% if span_gaps | bool %}
+        export SPAN_GAP_X={{ span_gap_x }} SPAN_GAP_Y={{ span_gap_y }}
+        {% endif %}
+        {% endif %}
+        # Keep the screen awake: an idle-blanked (DPMS off) screen drops the
+        # sketch to ~1 fps. Resets to the desktop default on next login.
+        xset s off -dpms && xset dpms force on || true
+        # Wait for the shared start second (chrony-synced clocks).
+        python3 -c 'import time; time.sleep(max(0, {{ start_at }} - time.time()))'
+        nohup "{{ java }}" -Djna.nosys=true \
+          -Djava.library.path="{{ core_lib }}" \
+          -cp "{{ build_dir }}:{{ core_lib }}/*" \
+          --enable-native-access=ALL-UNNAMED \
+          processing.core.PApplet --sketch-path="{{ sketch_dir }}" pyramid \
+          > "{{ log }}" 2>&1 &
+      args:
+        executable: /bin/bash
+      # Fire and forget, so Ansible reaches every laptop well before start_at
+      # (it works through only a few hosts at a time); each one waits for the
+      # shared second on its own clock.
+      async: 120
+      poll: 0
