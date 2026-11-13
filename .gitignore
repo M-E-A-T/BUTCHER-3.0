@@ -8,3 +8,8 @@ realtime/configs/main.yaml
 
 # Saved presets
 preset-*.yaml
+
+# Photobooth: captured GIFs, timestamped presets, Python cache
+photobooth/boothModes/photos/
+photobooth/boothModes/presets/preset-*.json
+__pycache__/

@@ -1,11 +1,8 @@
-// modesTogether: the four photobooth modes in one sketch, one window.
-//   organism  shader lines over the camera, a new colored pattern on every onset
-//   pixelz    camera pixel size follows the low band
-//   thermal   heat-camera look, bands drive its colours
-//   fft       the pyramid's FFT cloud over the camera
-//
-// Left/right arrows switch mode instantly. One camera and one audio listener
-// are shared by all modes, so every mode keeps up with the music even while hidden.
+// boothModes: the photobooth (trigger -> countdown -> GIF -> playback -> QR) with the
+// four modesTogether looks as the live view. The GIF records the mode as seen on screen.
+//   PS Move: square = thermal, triangle = fft, cross = pixelz, circle = organism
+//            (switches on the live screen only)
+//   trigger = shoot / confirm, MOVE during playback = redo. Booth flow is in booth.pde.
 //
 // Audio: BUTCHER audio server on UDP 9000 (/audio/lmh, /audio/onset/*, /audio/fft, /audio/meta).
 //
@@ -16,6 +13,7 @@
 import processing.video.*;
 import java.net.*;
 import java.nio.*;
+import java.io.*;
 
 String[] MODE_NAMES = { "organism", "pixelz", "thermal", "fft" };
 int current = 0;
@@ -47,7 +45,7 @@ int spanOffsetTop() { return 0; }
 int spanOffsetBottom() { return 0; }
 
 void settings() {
-  size(1280, 720, P2D);
+  fullScreen(P2D);
   pixelDensity(1);   // the fft cloud's point sizes and rim widths are in 1x pixels
 }
 
@@ -63,6 +61,7 @@ void setup() {
   cloud = new FftCloud();
 
   startOscListener();
+  boothSetup();
   showMode();
 }
 
@@ -94,17 +93,28 @@ void drawCamera() {
 }
 
 void draw() {
-  switch (current) {
-    case 0: organismDraw(); break;
-    case 1: pixelzMode.draw(); break;
-    case 2: thermalMode.draw(); break;
-    case 3: fftDraw(); break;
+  int r = requestedMode;
+  if (r >= 0) {
+    requestedMode = -1;
+    if (r != current && phase == 0) { current = r; showMode(); }
+  }
+  if (phase == 3 || phase == 4) {
+    background(12);
+    drawPlayback();
+  } else {
+    switch (current) {
+      case 0: organismDraw(); break;
+      case 1: pixelzMode.draw(); break;
+      case 2: thermalMode.draw(); break;
+      case 3: fftDraw(); break;
+    }
   }
   // leave shared drawing state clean for whichever mode draws next
   imageMode(CORNER);
   blendMode(BLEND);
   noTint();
   resetShader();
+  boothDraw();   // booth.pde: grabs GIF frames from the mode image, then draws the booth overlays
 }
 
 void fftDraw() {
@@ -118,13 +128,16 @@ void fftDraw() {
 }
 
 void showMode() {
-  surface.setTitle("modesTogether: " + MODE_NAMES[current]);
+  surface.setTitle("boothModes: " + MODE_NAMES[current]);
+  modeShownAt = millis();
   println("Mode: " + MODE_NAMES[current]);
   if (current != 0 && panel != null) panel.setVisible(false);   // organism's Controls window
 }
 
 void keyPressed() {
+  if (key == ' ') { wantShoot = true; return; }   // spacebar = trigger squeeze
   if (key == CODED && (keyCode == LEFT || keyCode == RIGHT)) {
+    if (phase != 0) return;
     current = (current + (keyCode == RIGHT ? 1 : -1) + MODE_NAMES.length) % MODE_NAMES.length;
     showMode();
     return;
@@ -186,6 +199,7 @@ void startOscListener() {
 }
 
 void dispose() {
+  stopBridge();
   if (oscSock != null) oscSock.close();
   if (cam != null) cam.stop();
 }
