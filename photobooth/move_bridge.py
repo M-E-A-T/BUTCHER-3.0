@@ -122,3 +122,4 @@ api = Bridge()
 emit('READY')
 while running[0]:
     api.update()
+    time.sleep(0.005)   # ~200 Hz is plenty; without it this loop eats a whole CPU core

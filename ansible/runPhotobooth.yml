@@ -1,0 +1,71 @@
+# Launches the photobooth (boothModes sketch + PS Move bridge) full screen on
+# the photobooth machine (the [photobooth] group in config/hosts.ini).
+# It runs ~/Desktop/psmove/run_boothModes.sh there, the same script you would
+# start by hand; the sketch starts move_bridge.py for the controller itself.
+#   ansible-playbook -i config/hosts.ini runPhotobooth.yml
+#   ansible-playbook -i config/hosts.ini runPhotobooth.yml -e stop=true   # stop it
+#
+# Screen (optional, off by default): at its native 4K the TV only refreshes at
+# 25 Hz, and every frame (and every GIF frame grab) costs 4x as much as at
+# 1080p on this machine. Switching to 1920x1080 @ 60 Hz first:
+#   ansible-playbook -i config/hosts.ini runPhotobooth.yml -e screen_mode=1920x1080
+# The first try (2026-11-13) was followed by the sketch dying silently and the
+# desktop session restarting, so it stays off until that's tested by hand.
+- name: Run the photobooth
+  hosts: "{{ target | default('photobooth') }}"
+  gather_facts: no
+  vars:
+    booth_dir: "/home/{{ ansible_user }}/Desktop/psmove"
+    log: "/home/{{ ansible_user }}/photobooth.log"
+    stop: false
+    screen_mode: ""
+    screen_rate: 60
+
+  tasks:
+    - name: Stop a running photobooth (sketch, Processing launcher, PS Move bridge)
+      ansible.builtin.shell: |
+        pkill -f "[p]smove/boothModes" || true
+        pkill -f "[m]ove_bridge.py" || true
+        sleep 2
+        pkill -9 -f "[p]smove/boothModes" || true
+        pkill -9 -f "[m]ove_bridge.py" || true
+        true
+      args:
+        executable: /bin/bash
+
+    - name: Set the screen resolution
+      when: not stop | bool and screen_mode | length > 0
+      ansible.builtin.shell: |
+        export DISPLAY=:0
+        out=$(xrandr | awk '/ connected primary/{print $1; exit}')
+        [ -n "$out" ] || out=$(xrandr | awk '/ connected/{print $1; exit}')
+        xrandr --output "$out" --mode {{ screen_mode }} --rate {{ screen_rate }}
+        sleep 2   # let the TV resync before the sketch goes full screen
+        xrandr | grep "^$out"
+      args:
+        executable: /bin/bash
+
+    - name: Launch on the screen
+      when: not stop | bool
+      ansible.builtin.shell: |
+        export DISPLAY=:0
+        export XDG_RUNTIME_DIR=/run/user/$(id -u)
+        export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
+        # Keep the screen awake while the booth waits for people.
+        xset s off -dpms && xset dpms force on || true
+        cd "{{ booth_dir }}"
+        nohup setsid ./run_boothModes.sh > "{{ log }}" 2>&1 < /dev/null &
+      args:
+        executable: /bin/bash
+
+    - name: Check it came up
+      when: not stop | bool
+      ansible.builtin.shell: |
+        for i in $(seq 1 30); do
+          pgrep -f "[p]smove/boothModes" > /dev/null && { echo "running"; exit 0; }
+          sleep 1
+        done
+        echo "not running after 30 s; last log lines:"; tail -20 "{{ log }}"; exit 1
+      args:
+        executable: /bin/bash
+      changed_when: false

@@ -2,7 +2,7 @@
 // four modesTogether looks as the live view. The GIF records the mode as seen on screen.
 //   PS Move: square = thermal, triangle = fft, cross = pixelz, circle = organism
 //            (switches on the live screen only)
-//   trigger = shoot / confirm, MOVE during playback = redo. Booth flow is in booth.pde.
+//   trigger = shoot / confirm. Booth flow is in booth.pde.
 //
 // Audio: BUTCHER audio server on UDP 9000 (/audio/lmh, /audio/onset/*, /audio/fft, /audio/meta).
 //
@@ -53,6 +53,16 @@ void setup() {
   textFont(createFont("SansSerif", 13));
   cams = Capture.list();
   printArray(cams);
+  // The video library hands frames straight to the GPU texture by default
+  // (GL buffer sink). On the booth machine that made the live camera jump back
+  // and forth between frames; plain pixel copies keep them in order.
+  try {
+    java.lang.reflect.Field f = Video.class.getDeclaredField("useGLBufferSink");
+    f.setAccessible(true);
+    f.setBoolean(null, false);
+  } catch (Exception e) {
+    println("could not turn off the GL buffer sink: " + e);
+  }
   openCamera(0);
 
   organismSetup();
@@ -67,7 +77,17 @@ void setup() {
 
 void openCamera(int i) {
   if (cam != null) cam.stop();
-  if (cams == null || cams.length == 0) {
+  camFrames = 0;
+  camCountFrom = millis();
+  camFpsLogged = false;
+  if (platform == LINUX && i == 0) {
+    // Ask for MJPEG explicitly: the booth webcam does 1280x720 at 30 fps as
+    // MJPEG but only 5 fps as raw YUY2, which GStreamer may otherwise pick.
+    camIndex = 0;
+    cam = new Capture(this, 1280, 720,
+      "pipeline:v4l2src device=/dev/video0 ! image/jpeg,width=1280,height=720,framerate=30/1 ! jpegdec");
+    println("camera: /dev/video0 MJPEG 1280x720@30");
+  } else if (cams == null || cams.length == 0) {
     cam = new Capture(this, 1280, 720);   // let GStreamer pick the default device
   } else {
     camIndex = i % cams.length;
@@ -77,8 +97,18 @@ void openCamera(int i) {
   cam.start();
 }
 
+int camFrames = 0, camCountFrom = 0;
+boolean camFpsLogged = false;
+
 void captureEvent(Capture c) {
   c.read();
+  camFrames++;
+  // Log the real camera rate once, 5 s after it opens (lag check).
+  int dt = millis() - camCountFrom;
+  if (!camFpsLogged && dt > 5000) {
+    camFpsLogged = true;
+    println(String.format("camera fps: %.1f", camFrames * 1000.0 / dt));
+  }
 }
 
 // Camera covering the window (crop, keep aspect), mirrored like a selfie camera.

@@ -1,9 +1,9 @@
 // booth.pde: the photobooth sequence from ../photobooth, on top of whichever mode is live.
 //   Squeeze the trigger all the way: 5-4-3-2-1 countdown (flash + controller buzz on each
 //   number), then a 3 second GIF of the mode on screen is recorded and saved to photos/
-//   (ffmpeg, kept under 5 MB). The GIF plays back:
-//     MOVE    = redo (straight into a new countdown)
-//     trigger = confirm (once saved) -> QR code screen; trigger there = back to live.
+//   (ffmpeg, kept under 5 MB). The GIF plays back with a big "saving..." until it's written,
+//   then the QR code screen (instagram.com/meatatlanta) comes up; trigger there, or 20 s,
+//   = back to live.
 //   Square / triangle / cross / circle pick the mode, on the live screen only.
 
 import com.google.zxing.*;
@@ -22,9 +22,7 @@ volatile boolean connected = false;
 volatile int flashAt = -100000;
 volatile boolean flashArmed = true;
 volatile boolean wantShoot = false;
-volatile boolean wantRedo = false;  // MOVE pressed (redo during playback)
 volatile int requestedMode = -1;    // set by a shape button, applied in draw()
-boolean moveWasHeld = false;
 String lastHeld = "-";
 volatile String battery = "";       // "0".."5", "CHARGING", "CHARGED" or "" (unknown)
 int modeShownAt = -100000;          // millis() of the last mode switch (name shown briefly)
@@ -33,9 +31,13 @@ int modeShownAt = -100000;          // millis() of the last mode switch (name sh
 final int COUNTDOWN = 5;          // seconds
 final float REC_SECONDS = 3;
 final int GIF_FPS = 15;
-final int GRAB_W = 1280;          // frames are grabbed from the screen and scaled to this width
+final int GRAB_W = 960;           // grabbed frames are shrunk (off the draw thread) to about this width
 final long GIF_MAX_BYTES = 5L * 1024 * 1024;
-final int[] GIF_WIDTHS = { 640, 512, 400 };  // tried in order until the file fits
+final int[] GIF_WIDTHS = { 512, 400 };  // tried in order, one at a time, until the file fits (640 never fit)
+// Shrinks grabbed frames in the background so recording doesn't stall the draw thread.
+java.util.concurrent.ExecutorService shrinkPool = java.util.concurrent.Executors.newSingleThreadExecutor();
+ArrayList<java.util.concurrent.Future<PImage>> pendingFrames = new ArrayList<java.util.concurrent.Future<PImage>>();
+int recSlowestGrab = 0;           // ms, logged after each recording
 volatile int phase = 0;           // 0 live, 1 countdown, 2 recording, 3 playback, 4 QR code
 int phaseStart = 0;
 int framesTaken = 0;
@@ -43,9 +45,16 @@ ArrayList<PImage> gifFrames = new ArrayList<PImage>();
 ArrayList<PImage> playFrames = new ArrayList<PImage>();
 int lastCount = -1;
 int countFlashAt = -100000;
-PFont bigFont, uiFont;
+PFont bigFont, uiFont, msgFont;
+final String START_PROMPT = "Squeeze the trigger to take a picture!";
+final String QR_DONE_HINT = "squeeze the trigger when you're done";
 // --- sharing (placeholder) ---
-final String SHARE_BASE_URL = "https://example.com/gif/";   // TODO: real hosting
+final String QR_URL = "https://instagram.com/meatatlanta";   // GIFs get posted there at the end of the night
+final String QR_LABEL = "@meatatlanta";
+final int QR_SECONDS = 20;       // QR screen goes back to the live camera on its own after this
+final String[] QR_MESSAGE = { "We will post the photobooth images at the end of the night!",
+                              "Follow / DM @meatatlanta for the link!" };
+final float QR_FRAC = 0.46;      // QR code size as a fraction of the screen height
 volatile boolean gifReady = false;
 volatile boolean gifFailed = false;
 volatile int encodeGen = 0;
@@ -57,8 +66,27 @@ volatile int noteAt = -100000;
 void boothSetup() {
   noCursor();
   uiFont = createFont("SansSerif", 32, true);
-  bigFont = createFont("NotoSans-Bold.ttf", round(height * 0.62), true);
+  bigFont = createFont("NotoSans-Bold.ttf", round(height * 0.62), true);   // countdown / "saving..."
+  // Message text gets its own font at about the size it's drawn: drawing it with
+  // bigFont (1300+ px glyphs at 4K) stalled the switch to the QR screen.
+  msgFont = createFont("NotoSans-Bold.ttf", round(height * 0.05), true);
+  // The QR code never changes: make it once, not on every GIF.
+  qr = makeQr(QR_URL, round(height * QR_FRAC));
+  warmUpText();
   startBridge();
+}
+
+// Draw everything the QR screen and start prompt use once, invisibly, so the
+// glyphs and the QR texture are already on the GPU when they're first needed.
+void warmUpText() {
+  pushStyle();
+  fill(0, 0);
+  textFont(msgFont);
+  textSize(height * 0.05);
+  for (String s : QR_MESSAGE) text(s, 0, 0);
+  text(QR_LABEL + START_PROMPT + QR_DONE_HINT + "0123456789", 0, 0);
+  if (qr != null) { tint(255, 0); image(qr, 0, 0); noTint(); }
+  popStyle();
 }
 
 // ---------------- controller ----------------
@@ -103,9 +131,6 @@ void handle(String line) {
       if (m >= 0 && phase == 0) requestedMode = m;
     }
     lastHeld = held;
-    boolean moveHeld = now.contains("MOVE");
-    if (moveHeld && !moveWasHeld) wantRedo = true;
-    moveWasHeld = moveHeld;
     // same thresholds as move_bridge.py: fire at 0.9, re-arm below 0.3
     if (flashArmed && trig >= 0.9) { flashArmed = false; wantShoot = true; }
     else if (trig < 0.3) flashArmed = true;
@@ -142,21 +167,23 @@ void boothDraw() {
   imageMode(CORNER);
 
   if (phase == 0) {
-    // mode name for a moment after a switch, and the connection status until connected
-    int t = millis() - modeShownAt;
-    if (t < 1500) {
-      float a = 255 * constrain((1500 - t) / 400.0, 0, 1);
-      String m = MODE_NAMES[current];
-      float bw = textWidthFor(m, 40) + 60;
+    if (connected) {
+      // start prompt: big, on a dark pill, gently breathing
+      float H = height;
+      textFont(msgFont);
+      textSize(H * 0.05);
+      float bw = textWidth(START_PROMPT) + H * 0.06, bh = H * 0.09;
+      float a = 0.75 + 0.25 * sin(millis() / 450.0);
       noStroke();
-      fill(0, 140 * a / 255);
+      fill(0, 150);
       rectMode(CENTER);
-      rect(width/2, height * 0.12, bw, 70, 14);
-      fill(255, a);
-      text(m, width/2, height * 0.12);
+      rect(width/2, H * 0.88, bw, bh, bh / 2);
       rectMode(CORNER);
-    }
-    if (!connected) {
+      fill(255, 255 * a);
+      text(START_PROMPT, width/2, H * 0.88);
+      textFont(uiFont);
+    } else {
+      // connection status until the controller is connected
       fill(255, 200);
       textSize(height * 0.04);
       text(status, width/2, height * 0.85);
@@ -175,6 +202,7 @@ void boothDraw() {
     rectMode(CORNER);
   }
   drawFlash();
+  drawCountdown();   // last, so nothing covers the number
   popStyle();
 }
 
@@ -221,7 +249,6 @@ float textWidthFor(String t, float size) { textSize(size); return textWidth(t); 
 
 void updateShoot(boolean haveFrame) {
   int t = millis() - phaseStart;
-  if (phase != 3) wantRedo = false;        // MOVE only means "redo" during playback
   if (phase == 0 && wantShoot) {
     wantShoot = false;
     if (haveFrame) startCountdown();
@@ -236,6 +263,8 @@ void updateShoot(boolean haveFrame) {
     if (t >= COUNTDOWN * 1000) {
       phase = 2; phaseStart = millis(); framesTaken = 0;
       gifFrames.clear();
+      pendingFrames.clear();
+      recSlowestGrab = 0;
       flashAt = millis();
       sendBridge("PULSE 400");
     }
@@ -244,40 +273,43 @@ void updateShoot(boolean haveFrame) {
     // grab the screen (the mode as drawn, before any overlay) every 1/GIF_FPS seconds
     int due = min(int(t * GIF_FPS / 1000.0) + 1, int(REC_SECONDS * GIF_FPS));
     if (framesTaken < due) {
-      PImage f = get(0, 0, width, height);
-      if (f.width > GRAB_W) f.resize(GRAB_W, 0);
-      gifFrames.add(f);
+      int g0 = millis();
+      final PImage f = get(0, 0, width, height);   // the only part that has to happen here
+      pendingFrames.add(shrinkPool.submit(new java.util.concurrent.Callable<PImage>() {
+        public PImage call() { return shrink(f, max(1, f.width / GRAB_W)); }
+      }));
+      recSlowestGrab = max(recSlowestGrab, millis() - g0);
       framesTaken++;
     }
     if (framesTaken >= int(REC_SECONDS * GIF_FPS)) {
+      // the shrink thread is at most a frame or two behind by now
+      for (java.util.concurrent.Future<PImage> p : pendingFrames) {
+        try { gifFrames.add(p.get()); } catch (Exception e) { println("frame shrink failed: " + e); }
+      }
+      pendingFrames.clear();
+      println("recorded " + gifFrames.size() + " frames, slowest grab " + recSlowestGrab + " ms, draw fps " + nf(frameRate, 0, 1));
       playFrames = new ArrayList<PImage>(gifFrames);
       encodeGif(playFrames);
       gifFrames = new ArrayList<PImage>();
       phase = 3; phaseStart = millis();
       sendBridge("QUIET 0");
     }
-  } else if (phase == 3 && wantRedo) {
-    wantRedo = false;
+  } else if (phase == 3 && gifReady) {
+    // saved: straight to the QR screen (no trigger needed)
     wantShoot = false;
-    playFrames = new ArrayList<PImage>();
-    startCountdown();
+    phase = 4; phaseStart = millis();
+    sendBridge("PULSE 150");
   } else if (phase == 3 && wantShoot) {
     wantShoot = false;
     if (gifFailed) {
       phase = 0;
       playFrames = new ArrayList<PImage>();
-    } else if (gifReady) {
-      qr = makeQr(SHARE_BASE_URL + lastGifName + ".gif", round(min(height * 0.55, 600)));
-      phase = 4; phaseStart = millis();
-      sendBridge("PULSE 150");
     }
   } else if (phase == 4) {
-    wantRedo = false;
-    if (wantShoot) {
+    if (wantShoot || t >= QR_SECONDS * 1000) {
       wantShoot = false;
       phase = 0;
       playFrames = new ArrayList<PImage>();
-      qr = null;
     }
   }
 }
@@ -299,26 +331,33 @@ void drawShootOverlay() {
       rectMode(CORNER);
       rect(0, 0, width, height);
     }
-    int n = max(1, COUNTDOWN - t / 1000);
-    float f = (t % 1000) / 1000.0;
-    float sz = bigFont.getSize() * (1 - 0.12 * f);
-    textFont(bigFont);
-    textSize(sz);
-    textAlign(CENTER, CENTER);
-    fill(0, 90);
-    text(n, width/2 + sz * 0.02, height/2 + sz * 0.02 - sz * 0.08);
-    fill(255);
-    text(n, width/2, height/2 - sz * 0.08);
-    textFont(uiFont);
+    // the number itself is drawn by drawCountdown(), on top of everything
   } else if (phase == 2) {
     float p = constrain(t / (REC_SECONDS * 1000), 0, 1);
     noStroke();
     fill(60, 220, 100);
     rectMode(CORNER);
     rect(0, height - 12, width * p, 12);
+  } else if (phase == 3 && !gifReady && !gifFailed) {
+    // big "saving..." over the playback until the GIF is written
+    noStroke();
+    fill(0, 120);
+    rectMode(CORNER);
+    rect(0, 0, width, height);
+    String dots = "...".substring(0, (millis() / 400) % 4);
+    float sz = height * 0.14;
+    textFont(bigFont);
+    textSize(sz);
+    textAlign(LEFT, CENTER);
+    float x = width/2 - textWidth("saving...") / 2;   // fixed left edge so the dots don't shift it
+    fill(0, 90);
+    text("saving" + dots, x + sz * 0.03, height/2 + sz * 0.03);
+    fill(255);
+    text("saving" + dots, x, height/2);
+    textAlign(CENTER, CENTER);
+    textFont(uiFont);
   } else if (phase == 3) {
-    String hint = gifReady ? "trigger: get your GIF     MOVE: redo"
-                : gifFailed ? "couldn't save - trigger: start over     MOVE: redo" : "saving...     MOVE: redo";
+    String hint = "couldn't save - trigger: start over";   // only shown if saving failed
     float bw = textWidthFor(hint, 26) + 40;
     noStroke();
     fill(0, 140);
@@ -346,8 +385,6 @@ void drawPlayback() {
 // Encode in the background: frames piped raw into ffmpeg; the biggest width under 5 MB is kept.
 void encodeGif(final ArrayList<PImage> frames) {
   final String name = "gif-" + year() + nf(month(), 2) + nf(day(), 2) + "-" + nf(hour(), 2) + nf(minute(), 2) + nf(second(), 2);
-  note = "saving gif...";
-  noteAt = millis() + 600000;
   gifReady = false;
   gifFailed = false;
   final int gen = ++encodeGen;
@@ -358,30 +395,14 @@ void encodeGif(final ArrayList<PImage> frames) {
     try {
       dir.mkdirs();
       for (PImage f : frames) f.loadPixels();
-      int n = GIF_WIDTHS.length - 1;
+      // One ffmpeg at a time, largest width first; stop at the first that fits.
       final File[] parts = new File[GIF_WIDTHS.length];
-      final Exception[] errs = new Exception[GIF_WIDTHS.length];
-      Thread[] ts = new Thread[n];
-      for (int i = 0; i < n; i++) {
-        final int k = i;
-        parts[k] = new File(dir, "." + name + "-" + GIF_WIDTHS[k] + ".gif");
-        ts[k] = new Thread(new Runnable() { public void run() {
-          try { encodeWidth(frames, GIF_WIDTHS[k], parts[k]); } catch (Exception e) { errs[k] = e; }
-        }});
-        ts[k].start();
-      }
-      for (Thread t : ts) t.join();
       File best = null;
-      for (int i = 0; i < n; i++) {
-        if (errs[i] != null) throw errs[i];
+      for (int i = 0; i < GIF_WIDTHS.length && best == null; i++) {
+        parts[i] = new File(dir, "." + name + "-" + GIF_WIDTHS[i] + ".gif");
+        encodeWidth(frames, GIF_WIDTHS[i], parts[i]);
         println("gif " + name + " at " + GIF_WIDTHS[i] + "px: " + parts[i].length() / 1024 + " KB");
-        if (best == null && parts[i].length() <= GIF_MAX_BYTES) best = parts[i];
-      }
-      if (best == null) {
-        parts[n] = new File(dir, "." + name + "-" + GIF_WIDTHS[n] + ".gif");
-        encodeWidth(frames, GIF_WIDTHS[n], parts[n]);
-        println("gif " + name + " at " + GIF_WIDTHS[n] + "px: " + parts[n].length() / 1024 + " KB");
-        best = parts[n];
+        if (parts[i].length() <= GIF_MAX_BYTES || i == GIF_WIDTHS.length - 1) best = parts[i];
       }
       best.renameTo(out);
       for (File f : parts) if (f != null && f.exists()) f.delete();
@@ -405,7 +426,8 @@ void encodeWidth(ArrayList<PImage> frames, int w, File out) throws Exception {
   String vf = "scale=" + w + ":-2:flags=lanczos,split[a][b];" +
               "[a]scale=320:-2,select='not(mod(n\\,3))',palettegen=stats_mode=full[p];" +
               "[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle";
-  ProcessBuilder pb = new ProcessBuilder("ffmpeg", "-y", "-loglevel", "error",
+  // nice: the encode runs while the GIF plays back, so the sketch keeps priority
+  ProcessBuilder pb = new ProcessBuilder("nice", "-n", "10", "ffmpeg", "-y", "-loglevel", "error",
     "-f", "rawvideo", "-pix_fmt", "0rgb", "-s", fw + "x" + fh, "-framerate", str(GIF_FPS), "-i", "-",
     "-vf", vf, "-loop", "0", "-f", "gif", out.getPath());
   pb.redirectErrorStream(true);
@@ -419,6 +441,29 @@ void encodeWidth(ArrayList<PImage> frames, int w, File out) throws Exception {
   }
   os.close();
   if (pr.waitFor() != 0) throw new IOException("ffmpeg exited with " + pr.exitValue() + " at " + w + "px");
+}
+
+// k x k box-average downscale (fast, runs on the shrink thread). k = 1 returns src.
+PImage shrink(PImage src, int k) {
+  if (k <= 1) return src;
+  int sw = src.width, w = sw / k, h = src.height / k, n = k * k;
+  PImage d = new PImage(w, h, RGB);
+  int[] s = src.pixels, o = d.pixels;
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      int r = 0, g = 0, b = 0;
+      for (int yy = 0; yy < k; yy++) {
+        int row = (y * k + yy) * sw + x * k;
+        for (int xx = 0; xx < k; xx++) {
+          int c = s[row + xx];
+          r += (c >> 16) & 0xff; g += (c >> 8) & 0xff; b += c & 0xff;
+        }
+      }
+      o[y * w + x] = 0xff000000 | ((r / n) << 16) | ((g / n) << 8) | (b / n);
+    }
+  }
+  d.updatePixels();
+  return d;
 }
 
 PImage makeQr(String text, int size) {
@@ -445,27 +490,53 @@ void drawQrScreen() {
   fill(0, 170);
   rectMode(CORNER);
   rect(0, 0, width, height);
-  float qs = min(height * 0.55, 600);
-  float cw = qs + 80, ch = qs + 190;
-  float cx = width/2, cy = height/2;
+  // everything is sized from the screen height, so it reads the same at 1080p and 4K
+  float H = height, cx = width/2;
+  // message above the card
+  textFont(msgFont);
+  textAlign(CENTER, CENTER);
+  textSize(H * 0.045);
+  fill(255);
+  text(QR_MESSAGE[0], cx, H * 0.10);
+  text(QR_MESSAGE[1], cx, H * 0.17);
+  // white card with the QR code and the address under it
+  float qs = H * QR_FRAC;
+  float cw = qs + H * 0.05, ch = qs + H * 0.10;
+  float cy = H * 0.58;
+  noStroke();
   fill(255);
   rectMode(CENTER);
-  rect(cx, cy, cw, ch, 28);
-  fill(20);
-  textSize(34);
-  text("scan to get your GIF", cx, cy - ch/2 + 50);
+  rect(cx, cy, cw, ch, H * 0.025);
   if (qr != null) {
     imageMode(CENTER);
-    image(qr, round(cx), round(cy + 5));
+    image(qr, round(cx), round(cy - H * 0.025));
     imageMode(CORNER);
   }
-  fill(120);
-  textSize(18);
-  text(SHARE_BASE_URL + lastGifName + ".gif", cx, cy + ch/2 - 52);
-  fill(255);
-  textSize(26);
-  text("squeeze the trigger when you're done", cx, cy + ch/2 + 40);
+  fill(20);
+  textSize(H * 0.03);
+  text(QR_LABEL, cx, cy + ch/2 - H * 0.04);
+  fill(220);
+  textSize(H * 0.026);
+  text(QR_DONE_HINT, cx, H * 0.94);
+  textFont(uiFont);
   rectMode(CORNER);
+}
+
+// 5-4-3-2-1: called at the very end of boothDraw() so it sits above every other layer
+void drawCountdown() {
+  if (phase != 1) return;
+  int t = millis() - phaseStart;
+  int n = max(1, COUNTDOWN - t / 1000);
+  float f = (t % 1000) / 1000.0;
+  float sz = bigFont.getSize() * (1 - 0.12 * f);
+  textFont(bigFont);
+  textSize(sz);
+  textAlign(CENTER, CENTER);
+  fill(0, 90);
+  text(n, width/2 + sz * 0.02, height/2 + sz * 0.02 - sz * 0.08);
+  fill(255);
+  text(n, width/2, height/2 - sz * 0.08);
+  textFont(uiFont);
 }
 
 void drawFlash() {
