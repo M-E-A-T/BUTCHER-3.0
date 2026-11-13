@@ -13,3 +13,8 @@ preset-*.yaml
 photobooth/boothModes/photos/
 photobooth/boothModes/presets/preset-*.json
 __pycache__/
+
+# Show launcher: progress and step logs
+show/state.json
+show/state.json.tmp
+show/logs/

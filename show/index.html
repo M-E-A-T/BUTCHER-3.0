@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Show Launcher</title>
+<style>
+  :root {
+    --bg: #0e0f12; --panel: #17191e; --panel2: #1e2128; --line: #2a2e37;
+    --text: #e8e9ec; --muted: #8b909c;
+    --ok: #3ecf7a; --fail: #ff5a5f; --run: #4ea1ff; --queued: #c9a227; --pending: #5a606c;
+    --accent: #4ea1ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 28px 16px 40px; }
+  header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 22px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: .02em; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .spacer { flex: 1; }
+  button { font: inherit; font-size: 14px; border: 1px solid var(--line); background: var(--panel2);
+           color: var(--text); padding: 8px 14px; border-radius: 8px; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: #3b414d; background: #252933; }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #06121f; font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: #6cb2ff; border-color: #6cb2ff; }
+  .layout { display: grid; grid-template-columns: 380px 1fr; gap: 18px; }
+  @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+
+  .steps { display: flex; flex-direction: column; gap: 10px; }
+  .step { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px;
+          display: grid; grid-template-columns: 36px 1fr; gap: 12px; cursor: pointer; }
+  .step.sel { border-color: #3b414d; background: #1a1d23; }
+  .step.current { border-color: var(--run); box-shadow: 0 0 0 1px var(--run) inset; }
+  .num { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center;
+         font-weight: 700; background: var(--panel2); border: 2px solid var(--pending); color: var(--muted); }
+  .st-ok .num { border-color: var(--ok); color: var(--ok); }
+  .st-failed .num { border-color: var(--fail); color: var(--fail); }
+  .st-running .num { border-color: var(--run); color: var(--run); animation: pulse 1.2s infinite; }
+  .st-queued .num { border-color: var(--queued); color: var(--queued); }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 6px rgba(78,161,255,.15); } }
+  .name { font-weight: 600; font-size: 16px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .detail { color: var(--muted); font-size: 12.5px; }
+  .badge { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+           padding: 2px 8px; border-radius: 999px; background: var(--panel2); color: var(--muted); }
+  .st-ok .badge { color: var(--ok); background: rgba(62,207,122,.12); }
+  .st-failed .badge { color: var(--fail); background: rgba(255,90,95,.12); }
+  .st-running .badge { color: var(--run); background: rgba(78,161,255,.12); }
+  .st-queued .badge { color: var(--queued); background: rgba(201,162,39,.12); }
+  .msg { font-size: 13px; margin-top: 6px; color: var(--muted); word-break: break-word; }
+  .st-failed .msg { color: #ff9a9d; }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  .time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .live { font-size: 12px; color: var(--muted); }
+  .live b { color: var(--ok); } .live b.down { color: var(--fail); }
+  a { color: var(--accent); }
+
+  .logbox { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+            display: flex; flex-direction: column; min-height: 420px; }
+  .loghead { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  .loghead .t { font-weight: 600; }
+  pre { margin: 0; padding: 12px 14px; flex: 1; overflow: auto; max-height: 70vh;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #c9ccd3; white-space: pre-wrap; word-break: break-all; }
+  .banner { margin-bottom: 16px; padding: 10px 14px; border-radius: 10px; font-size: 14px;
+            background: var(--panel); border: 1px solid var(--line); }
+  .banner.err { border-color: var(--fail); color: #ff9a9d; }
+  .hide { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Show Launcher</h1>
+      <div class="sub" id="where">Audio server → Pyramid wall → Photobooth</div>
+    </div>
+    <div class="spacer"></div>
+    <button id="reset" title="Mark every step as not started (doesn't stop anything)">Reset progress</button>
+    <button id="cont">Continue</button>
+    <button id="all" class="primary">Launch all in order</button>
+  </header>
+  <div id="banner" class="banner hide"></div>
+
+  <div class="layout">
+    <div class="steps" id="steps"></div>
+    <div class="logbox">
+      <div class="loghead">
+        <span class="t" id="logtitle">Log</span>
+        <span class="spacer"></span>
+        <label class="time"><input type="checkbox" id="follow" checked> follow</label>
+      </div>
+      <pre id="log"></pre>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let S = null;                 // last state from the server
+let selected = null;          // step whose log is shown
+let userPicked = false;       // once the user clicks a step, stop auto-following the current one
+const LABEL = { pending: 'not started', queued: 'waiting', running: 'running', ok: 'done', failed: 'failed' };
+
+function fmtDur(s) {
+  if (s == null) return '';
+  s = Math.max(0, Math.round(s));
+  return s < 60 ? s + ' s' : Math.floor(s / 60) + ' min ' + (s % 60) + ' s';
+}
+function fmtTime(t) { return t ? new Date(t * 1000).toLocaleTimeString() : ''; }
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+function showBanner(text, err) {
+  const b = $('banner');
+  b.textContent = text;
+  b.className = 'banner' + (err ? ' err' : '') + (text ? '' : ' hide');
+}
+
+async function post(path) {
+  try {
+    const r = await fetch(path, { method: 'POST' });
+    const j = await r.json();
+    if (!j.ok) showBanner(j.error || 'could not start', true);
+    else showBanner('');
+  } catch (e) { showBanner('launcher not reachable: ' + e, true); }
+  poll();
+}
+
+function render() {
+  const busy = S.busy;
+  $('all').disabled = busy;
+  $('reset').disabled = busy;
+  const nextIdx = S.steps.findIndex((s) => s.id === S.next);
+  $('cont').disabled = busy || S.next == null;
+  $('cont').textContent = S.next == null ? 'All done' : 'Continue from step ' + (nextIdx + 1);
+
+  const cur = S.steps.findIndex((s) => s.id === S.current);
+  $('where').textContent = busy && cur >= 0
+    ? 'Running step ' + (cur + 1) + ' of ' + S.steps.length + ': ' + S.steps[cur].name
+    : S.next == null ? 'Everything is up.'
+    : 'Next up: step ' + (nextIdx + 1) + ', ' + S.steps[nextIdx].name;
+
+  if (!userPicked) selected = S.current || selected || S.steps[0].id;
+
+  $('steps').innerHTML = S.steps.map((s, i) => {
+    const dur = s.started ? fmtDur((s.ended || S.now) - s.started) : '';
+    const when = s.status === 'running' ? 'running for ' + dur
+               : s.ended ? fmtTime(s.ended) + ' (' + dur + ')' : '';
+    const live = s.id === 'audio' && s.status === 'ok'
+      ? `<span class="live">server: <b class="${S.audio_alive ? '' : 'down'}">${S.audio_alive ? 'up' : 'DOWN'}</b>` +
+        (S.audio_alive ? ` · <a href="${S.audio_ui}" target="_blank" onclick="event.stopPropagation()">open audio UI</a>` : '') + '</span>'
+      : '';
+    return `<div class="step st-${s.status}${s.id === S.current ? ' current' : ''}${s.id === selected ? ' sel' : ''}" data-id="${s.id}">
+      <div class="num">${s.status === 'ok' ? '✓' : s.status === 'failed' ? '!' : i + 1}</div>
+      <div>
+        <div class="name">${esc(s.name)} <span class="badge">${LABEL[s.status] || s.status}</span></div>
+        <div class="detail">${esc(s.detail)}</div>
+        ${s.message ? `<div class="msg">${esc(s.message)}</div>` : ''}
+        <div class="row">
+          <button data-run="${s.id}" ${busy ? 'disabled' : ''}>${s.status === 'pending' || s.status === 'queued' ? 'Launch' : 'Relaunch'} this step</button>
+          <span class="time">${when}</span>
+        </div>
+        ${live ? `<div class="row">${live}</div>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+
+  const sel = S.steps.find((s) => s.id === selected);
+  $('logtitle').textContent = 'Log: ' + (sel ? sel.name : '');
+}
+
+async function poll() {
+  try {
+    const r = await fetch('/api/state');
+    S = await r.json();
+    if ($('banner').textContent.startsWith('launcher not reachable')) showBanner('');
+    render();
+    await pollLog();
+  } catch (e) {
+    showBanner('launcher not reachable (is show.sh still running?)', true);
+  }
+}
+
+async function pollLog() {
+  if (!selected) return;
+  const r = await fetch('/api/log?step=' + selected);
+  const text = await r.text();
+  const pre = $('log');
+  if (pre.textContent !== text) {
+    pre.textContent = text || '(no output yet)';
+    if ($('follow').checked) pre.scrollTop = pre.scrollHeight;
+  }
+}
+
+$('steps').addEventListener('click', (e) => {
+  const run = e.target.closest('[data-run]');
+  if (run) { e.stopPropagation(); selected = run.dataset.run; userPicked = false; post('/api/run?step=' + run.dataset.run); return; }
+  const card = e.target.closest('.step');
+  if (card) { selected = card.dataset.id; userPicked = true; render(); pollLog(); }
+});
+$('all').onclick = () => { userPicked = false; post('/api/run_all'); };
+$('cont').onclick = () => { userPicked = false; post('/api/continue'); };
+$('reset').onclick = () => { if (confirm('Mark every step as not started? Nothing gets stopped.')) post('/api/reset'); };
+
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>
