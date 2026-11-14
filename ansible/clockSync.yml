@@ -5,6 +5,10 @@
 #
 #   ansible-playbook -i config/hosts.ini clockSync.yml -K
 #
+# Only the TV laptops, relaunching the tvs sketch instead of the pyramid:
+#   ansible-playbook -i config/hosts.ini clockSync.yml -K --limit localhost,tvs -e relaunch=tvs
+# (relaunch=none syncs clocks without relaunching anything.)
+#
 # -K asks for the laptops' sudo password; the play also asks for this Mac's
 # sudo password (chronyd must run as root to serve NTP on port 123).
 # The Mac's address on the laptop network is detected automatically.
@@ -98,7 +102,16 @@
     clock_master: "{{ hostvars['localhost'].clock_master }}"
 
   tasks:
+    # The laptops are offline on the show network, so only touch apt (which
+    # refreshes its package lists from the internet) when chrony is missing.
+    - name: Check whether chrony is installed
+      ansible.builtin.command: dpkg-query -W -f=${Status} chrony
+      register: chrony_pkg
+      failed_when: false
+      changed_when: false
+
     - name: Install chrony (replaces systemd-timesyncd)
+      when: "'install ok installed' not in chrony_pkg.stdout"
       ansible.builtin.apt:
         name: chrony
         state: present
@@ -142,3 +155,8 @@
 
 - name: Relaunch the pyramid sketch (now on the synced clock)
   ansible.builtin.import_playbook: runPyramid.yml
+  when: relaunch | default('pyramid') == 'pyramid'
+
+- name: Relaunch the tvs sketch (now on the synced clock)
+  ansible.builtin.import_playbook: runTvs.yml
+  when: relaunch | default('pyramid') == 'tvs'

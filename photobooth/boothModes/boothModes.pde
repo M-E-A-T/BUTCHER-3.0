@@ -73,6 +73,27 @@ void setup() {
   startOscListener();
   boothSetup();
   showMode();
+  // M.E.A.T. logo, black on transparent (made from ansible/background.png).
+  meatLogo = loadImage("meat_logo.png");
+}
+
+// Logo in the top-left corner of the screen, under the booth overlays
+// (countdown, prompts) but part of the picture, so it's in the GIFs too.
+PImage meatLogo;
+final float LOGO_WIDTH = 0.28;    // fraction of the screen width
+final float LOGO_MARGIN = 0.03;   // fraction of the screen height
+
+void drawLogo() {
+  if (meatLogo == null || meatLogo.width <= 0) return;
+  float w = width * LOGO_WIDTH;
+  float h = w * meatLogo.height / meatLogo.width;
+  float m = height * LOGO_MARGIN;
+  pushStyle();
+  imageMode(CORNER);
+  blendMode(BLEND);
+  noTint();
+  image(meatLogo, m, m, w, h);
+  popStyle();
 }
 
 void openCamera(int i) {
@@ -144,6 +165,9 @@ void draw() {
   blendMode(BLEND);
   noTint();
   resetShader();
+  // Logo before boothDraw(), so it's in the grabbed GIF frames. Playback and
+  // the QR screen show those frames (scaled to the same spot), logo included.
+  if (phase <= 2) drawLogo();
   boothDraw();   // booth.pde: grabs GIF frames from the mode image, then draws the booth overlays
 }
 

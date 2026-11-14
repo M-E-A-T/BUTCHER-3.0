@@ -4,9 +4,19 @@ Show launcher: brings the show up in order, from a small web page.
 
   1. audio      local audio server (realtime/), OSC out to the laptops
   2. pyramid    pyramid sketch on the six-screen wall (ansible/runPyramidWall.yml)
-  3. photobooth photobooth on 10.10.10.150 (ansible/runPhotobooth.yml)
+  3. tvs        skyline sketch on the TV laptops (ansible/runTvs.yml, [tvs] group)
+  4. photobooth photobooth on 10.10.10.150 (ansible/runPhotobooth.yml)
 
-"Launch all" runs 1 -> 2 -> 3 and stops at the first step that fails. Any
+Titlecards: the page lists the TV sketch's titlecard names (read from
+tvs/skysets.pde); clicking one sends OSC /tvs/title <name> to every [tvs]
+laptop on UDP 9000, so all screens switch together ("OFF" hides them).
+
+Kill all (button, or `./show.sh kill`): stops a step that is still running,
+runs ansible/killAll.yml on every laptop (pyramid, TV sketch, photobooth, OSC
+monitor, NDI), stops the audio server on this Mac, then closes the launcher
+(and with it ./show.sh). Its output goes to show/logs/killall.log.
+
+"Launch all" runs the steps in order and stops at the first step that fails. Any
 single step can be relaunched on its own, and "Continue" picks up from the
 first step that isn't done. Progress is kept in show/state.json, so a page
 refresh (or restarting the launcher) still shows where things are. Each
@@ -15,7 +25,7 @@ step's output goes to show/logs/<step>.log.
 Started by ../show.sh; serves the page on http://127.0.0.1:8770 (local only).
 Python standard library only.
 """
-import argparse, json, os, signal, socket, subprocess, sys, threading, time, urllib.request, webbrowser
+import argparse, json, os, re, signal, socket, subprocess, sys, threading, time, urllib.request, webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -27,14 +37,20 @@ LOGS = os.path.join(HERE, 'logs')
 STATE_FILE = os.path.join(HERE, 'state.json')
 AUDIO_BIN = os.path.join(REALTIME, 'engine', 'target', 'release', 'audio-server')
 AUDIO_UI = 'http://127.0.0.1:8766'
+HOSTS_INI = os.path.join(ANSIBLE, 'config', 'hosts.ini')
+TVS_SKETCH = os.path.join(ROOT, 'tvs', 'skysets.pde')
+OSC_PORT = 9000
 
 STEPS = [
     {'id': 'audio', 'name': 'Audio server', 'detail': 'realtime/ on this Mac, UI on :8766'},
     {'id': 'pyramid', 'name': 'Pyramid wall', 'detail': 'runPyramidWall.yml, six laptops'},
+    {'id': 'tvs', 'name': 'TV screens', 'detail': 'runTvs.yml, skyline sketch on the [tvs] laptops'},
     {'id': 'photobooth', 'name': 'Photobooth', 'detail': 'runPhotobooth.yml on 10.10.10.150'},
 ]
 IDS = [s['id'] for s in STEPS]
 
+current_proc = None              # subprocess of the step running right now (Kill all stops it)
+killing = threading.Event()      # set once Kill all has started
 lock = threading.Lock()          # guards `state`
 run_lock = threading.Lock()      # only one run (sequence or single step) at a time
 state = {
@@ -42,6 +58,7 @@ state = {
     'current': None,             # step id being run right now
     'mode': None,                # 'all', 'continue' or 'single' while running
     'last_action': None,
+    'title': None,               # last titlecard sent to the TV screens
 }
 
 
@@ -60,6 +77,7 @@ def load_state():
                     s['message'] = 'launcher stopped while this step was running'
                 state['steps'][i].update(s)
         state['last_action'] = saved.get('last_action')
+        state['title'] = saved.get('title')
     except (OSError, ValueError):
         pass
 
@@ -67,7 +85,8 @@ def load_state():
 def save_state():
     tmp = STATE_FILE + '.tmp'
     with open(tmp, 'w') as f:
-        json.dump({'steps': state['steps'], 'last_action': state['last_action']}, f, indent=2)
+        json.dump({'steps': state['steps'], 'last_action': state['last_action'],
+                   'title': state['title']}, f, indent=2)
     os.replace(tmp, STATE_FILE)
 
 
@@ -87,8 +106,13 @@ def run_cmd(step, cmd, cwd, log):
     """Run cmd, appending its output to the open log file. Returns the exit code."""
     log.write('\n$ ' + ' '.join(cmd) + '\n')
     log.flush()
+    global current_proc
     p = subprocess.Popen(cmd, cwd=cwd, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
-    return p.wait()
+    current_proc = p
+    try:
+        return p.wait()
+    finally:
+        current_proc = None
 
 
 def port_open(port, host='127.0.0.1'):
@@ -148,11 +172,15 @@ def step_pyramid(log):
     return playbook('pyramid', 'runPyramidWall.yml', log)
 
 
+def step_tvs(log):
+    return playbook('tvs', 'runTvs.yml', log)
+
+
 def step_photobooth(log):
     return playbook('photobooth', 'runPhotobooth.yml', log)
 
 
-RUNNERS = {'audio': step_audio, 'pyramid': step_pyramid, 'photobooth': step_photobooth}
+RUNNERS = {'audio': step_audio, 'pyramid': step_pyramid, 'tvs': step_tvs, 'photobooth': step_photobooth}
 
 
 def run_step(step):
@@ -206,6 +234,126 @@ def start_run(steps, mode):
     return True
 
 
+# ---------------------------------------------------------------- titlecards
+
+def tvs_hosts():
+    """Addresses in the [tvs] group of ansible/config/hosts.ini."""
+    hosts, section = [], None
+    try:
+        with open(HOSTS_INI) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith(('#', ';')):
+                    continue
+                if line.startswith('['):
+                    section = line.strip('[]')
+                elif section == 'tvs':
+                    hosts.append(line.split()[0])
+    except OSError:
+        pass
+    return hosts
+
+
+def title_names():
+    """The titlecardNames array in tvs/skysets.pde, in order."""
+    try:
+        with open(TVS_SKETCH) as f:
+            m = re.search(r'titlecardNames\s*=\s*\{([^}]*)\}', f.read())
+        return re.findall(r'"([^"]*)"', m.group(1)) if m else []
+    except OSError:
+        return []
+
+
+def osc_string(addr, text):
+    def pad(b):
+        return b + b'\0' * (4 - len(b) % 4)
+    return pad(addr.encode()) + pad(b',s') + pad(text.encode())
+
+
+def send_title(name):
+    """Sends /tvs/title <name> to every TV laptop. Returns (hosts sent to, errors)."""
+    msg = osc_string('/tvs/title', name)
+    sent, errors = [], []
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        for h in tvs_hosts():
+            try:
+                # a few copies: UDP can drop one, and repeats are harmless
+                for _ in range(3):
+                    sock.sendto(msg, (h, OSC_PORT))
+                sent.append(h)
+            except OSError as e:
+                errors.append('%s: %s' % (h, e))
+    with lock:
+        state['title'] = {'name': name, 'at': time.time(), 'hosts': sent, 'errors': errors}
+        save_state()
+    return sent, errors
+
+
+# ---------------------------------------------------------------- kill all
+
+def kill_everything(log):
+    """Stops the show everywhere. Returns (ok, message)."""
+    def say(text):
+        log.write(text + '\n')
+        log.flush()
+
+    say('== %s  kill all' % time.strftime('%Y-%m-%d %H:%M:%S'))
+    p = current_proc
+    if p is not None and p.poll() is None:
+        say('stopping the step that is still running (pid %d)' % p.pid)
+        p.terminate()
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+
+    say('\n-- laptops: killAll.yml (pyramid, TV sketch, photobooth, OSC monitor, NDI)')
+    rc = run_cmd('killall', ['ansible-playbook', '-i', 'config/hosts.ini', 'killAll.yml'], ANSIBLE, log)
+    # rc 4 = only unreachable hosts (switched off, so nothing runs there): not a failure.
+    laptops_ok = rc in (0, 4)
+    offline = []
+    if rc == 4:
+        log.flush()
+        with open(log_path('killall')) as f:
+            offline = re.findall(r'^(\S+)\s*:.*unreachable=[1-9]', f.read(), re.M)
+
+    say('\n-- this Mac: audio server')
+    subprocess.call(['pkill', '-f', 'engine/target/release/audio-server'])
+    for _ in range(20):
+        if not audio_alive():
+            break
+        time.sleep(0.25)
+    audio_ok = not audio_alive()
+    say('audio server stopped' if audio_ok else 'audio server still answering')
+
+    for i in IDS:
+        set_step(i, status='pending', started=None, ended=None, message='stopped by Kill all')
+    if laptops_ok and audio_ok:
+        note = (' (%d laptop%s not reachable, probably off: %s)'
+                % (len(offline), '' if len(offline) == 1 else 's', ', '.join(offline))) if offline else ''
+        return True, 'everything stopped' + note
+    why = []
+    if not laptops_ok:
+        why.append('killAll.yml: %s' % {2: 'a task failed', 4: 'a host was unreachable'}.get(rc, 'exit %d' % rc))
+    if not audio_ok:
+        why.append('audio server still running')
+    return False, '; '.join(why) + ' (see killall.log)'
+
+
+def kill_all_then_quit():
+    with lock:
+        state['killall'] = {'status': 'running', 'message': '', 'at': time.time()}
+    os.makedirs(LOGS, exist_ok=True)
+    with open(log_path('killall'), 'w') as log:
+        ok, msg = kill_everything(log)
+        log.write('\n== %s: %s\nclosing the show launcher\n' % ('OK' if ok else 'PROBLEMS', msg))
+    with lock:
+        state['killall'] = {'status': 'ok' if ok else 'failed', 'message': msg, 'at': time.time()}
+    print('kill all: ' + msg + ' - closing the show launcher')
+    time.sleep(2.5)            # let the page fetch the result once more
+    os._exit(0 if ok else 1)
+
+
 # ---------------------------------------------------------------- http
 
 def snapshot():
@@ -218,7 +366,9 @@ def snapshot():
         busy = run_lock.locked()
         nxt = next((m['id'] for m in STEPS if state['steps'][m['id']]['status'] != 'ok'), None)
         return {'steps': steps, 'current': state['current'], 'mode': state['mode'], 'busy': busy,
-                'next': nxt, 'audio_alive': audio_alive(), 'audio_ui': AUDIO_UI, 'now': time.time()}
+                'next': nxt, 'audio_alive': audio_alive(), 'audio_ui': AUDIO_UI, 'now': time.time(),
+                'titles': title_names(), 'title': state['title'], 'tvs_hosts': tvs_hosts(),
+                'killall': state.get('killall')}
 
 
 def tail(path, max_bytes=60000):
@@ -254,7 +404,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, json.dumps(snapshot()))
         elif u.path == '/api/log':
             step = parse_qs(u.query).get('step', [''])[0]
-            if step not in IDS + ['audio-server']:
+            if step not in IDS + ['audio-server', 'killall']:
                 return self.send(404, '{"error":"unknown step"}')
             self.send(200, tail(log_path(step)), 'text/plain; charset=utf-8')
         else:
@@ -275,6 +425,20 @@ class Handler(BaseHTTPRequestHandler):
             if step not in IDS:
                 return self.send(404, '{"error":"unknown step"}')
             ok = start_run([step], 'single')
+        elif u.path == '/api/kill_all':
+            if killing.is_set():
+                return self.send(200, json.dumps({'ok': True, 'error': None}))
+            killing.set()
+            threading.Thread(target=kill_all_then_quit, daemon=True).start()
+            return self.send(200, json.dumps({'ok': True, 'error': None}))
+        elif u.path == '/api/title':
+            name = q.get('name', [''])[0]
+            if name != 'OFF' and name not in title_names():
+                return self.send(404, '{"error":"unknown titlecard"}')
+            sent, errors = send_title(name)
+            ok = bool(sent) and not errors
+            return self.send(200, json.dumps({'ok': ok, 'sent': sent,
+                'error': None if ok else ('; '.join(errors) or 'no [tvs] hosts in hosts.ini')}))
         elif u.path == '/api/reset':
             if run_lock.locked():
                 ok = False
@@ -291,7 +455,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--port', type=int, default=8770)
     ap.add_argument('--no-browser', action='store_true')
+    ap.add_argument('--kill-all', action='store_true',
+                    help='stop the show everywhere and close a running launcher, then exit')
     args = ap.parse_args()
+    if args.kill_all:
+        return cli_kill_all(args.port)
     os.makedirs(LOGS, exist_ok=True)
     load_state()
     save_state()
@@ -307,5 +475,31 @@ def main():
         pass
 
 
+def cli_kill_all(port):
+    """./show.sh kill: use the running launcher if there is one, else do it here."""
+    url = 'http://127.0.0.1:%d' % port
+    try:
+        urllib.request.urlopen(urllib.request.Request(url + '/api/kill_all', method='POST'), timeout=3).read()
+    except OSError:
+        print('no show launcher running; stopping everything from here (log: show/logs/killall.log)')
+        os.makedirs(LOGS, exist_ok=True)
+        with open(log_path('killall'), 'w') as log:
+            ok, msg = kill_everything(log)
+        print('kill all: ' + msg)
+        return 0 if ok else 1
+    print('kill all started in the show launcher (log: show/logs/killall.log)')
+    last = None
+    while True:
+        time.sleep(1)
+        try:
+            st = json.loads(urllib.request.urlopen(url + '/api/state', timeout=3).read())
+        except OSError:
+            break              # the launcher closed itself: done
+        k = st.get('killall') or {}
+        last = k
+    print('kill all: ' + ((last or {}).get('message') or 'done') + '; show launcher closed')
+    return 0 if (last or {}).get('status') != 'failed' else 1
+
+
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

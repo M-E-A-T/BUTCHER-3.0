@@ -25,6 +25,8 @@
   button:disabled { opacity: .4; cursor: default; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #06121f; font-weight: 600; }
   button.primary:hover:not(:disabled) { background: #6cb2ff; border-color: #6cb2ff; }
+  button.danger { background: transparent; border-color: var(--fail); color: var(--fail); font-weight: 700; }
+  button.danger:hover:not(:disabled) { background: var(--fail); border-color: var(--fail); color: #1a0506; }
   .layout { display: grid; grid-template-columns: 380px 1fr; gap: 18px; }
   @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
 
@@ -66,6 +68,15 @@
             background: var(--panel); border: 1px solid var(--line); }
   .banner.err { border-color: var(--fail); color: #ff9a9d; }
   .hide { display: none; }
+
+  .left { display: flex; flex-direction: column; gap: 18px; }
+  .titles { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .titles h2 { font-size: 16px; margin: 0 0 2px; }
+  .tgrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 12px; }
+  .tgrid button { padding: 12px 10px; font-weight: 700; letter-spacing: .04em; }
+  .tgrid button.on { background: var(--accent); border-color: var(--accent); color: #06121f; }
+  .tgrid button.off { grid-column: 1 / -1; font-weight: 600; letter-spacing: 0; }
+  .tgrid button.off.on { background: var(--panel2); border-color: var(--fail); color: var(--fail); }
 </style>
 </head>
 <body>
@@ -73,17 +84,26 @@
   <header>
     <div>
       <h1>Show Launcher</h1>
-      <div class="sub" id="where">Audio server → Pyramid wall → Photobooth</div>
+      <div class="sub" id="where">Audio server → Pyramid wall → TV screens → Photobooth</div>
     </div>
     <div class="spacer"></div>
     <button id="reset" title="Mark every step as not started (doesn't stop anything)">Reset progress</button>
     <button id="cont">Continue</button>
     <button id="all" class="primary">Launch all in order</button>
+    <button id="killall" class="danger" title="Stop the show on every laptop and this Mac, then close the launcher">Kill all</button>
   </header>
   <div id="banner" class="banner hide"></div>
 
   <div class="layout">
-    <div class="steps" id="steps"></div>
+    <div class="left">
+      <div class="steps" id="steps"></div>
+      <div class="titles">
+        <h2>Titlecards</h2>
+        <div class="detail" id="titlehint">Click a name to show it on every TV screen.</div>
+        <div class="tgrid" id="tgrid"></div>
+        <div class="msg" id="titlemsg"></div>
+      </div>
+    </div>
     <div class="logbox">
       <div class="loghead">
         <span class="t" id="logtitle">Log</span>
@@ -127,7 +147,8 @@ async function post(path) {
 }
 
 function render() {
-  const busy = S.busy;
+  const busy = S.busy || !!S.killall;
+  $('killall').disabled = !!S.killall;
   $('all').disabled = busy;
   $('reset').disabled = busy;
   const nextIdx = S.steps.findIndex((s) => s.id === S.next);
@@ -165,19 +186,50 @@ function render() {
     </div>`;
   }).join('');
 
+  renderTitles();
+
   const sel = S.steps.find((s) => s.id === selected);
-  $('logtitle').textContent = 'Log: ' + (sel ? sel.name : '');
+  $('logtitle').textContent = 'Log: ' + (selected === 'killall' ? 'Kill all' : sel ? sel.name : '');
 }
+
+function renderTitles() {
+  const cur = S.title ? S.title.name : null;
+  const html = S.titles.map((n) =>
+    `<button data-title="${esc(n)}" class="${n === cur ? 'on' : ''}">${esc(n)}</button>`).join('') +
+    `<button data-title="OFF" class="off${cur === 'OFF' ? ' on' : ''}">Titlecards off</button>`;
+  if ($('tgrid').innerHTML !== html) $('tgrid').innerHTML = html;
+  $('titlehint').textContent = 'Click a name to show it on every TV screen (' +
+    S.tvs_hosts.length + ' in the [tvs] group).';
+  const t = S.title;
+  $('titlemsg').textContent = !t ? ''
+    : (t.name === 'OFF' ? 'Turned off' : 'Showing ' + t.name) + ' · sent to ' + t.hosts.length +
+      ' screen' + (t.hosts.length === 1 ? '' : 's') + ' at ' + fmtTime(t.at) +
+      (t.errors && t.errors.length ? ' · failed: ' + t.errors.join(', ') : '');
+}
+
+let killStarted = false;
+let killResult = null;
 
 async function poll() {
   try {
     const r = await fetch('/api/state');
     S = await r.json();
-    if ($('banner').textContent.startsWith('launcher not reachable')) showBanner('');
+    if (S.killall) {
+      killResult = S.killall;
+      showBanner(S.killall.status === 'running' ? 'Kill all: stopping everything...'
+        : 'Kill all: ' + S.killall.message + '. Closing the launcher...', S.killall.status === 'failed');
+    } else if ($('banner').textContent.startsWith('launcher not reachable')) showBanner('');
     render();
     await pollLog();
   } catch (e) {
-    showBanner('launcher not reachable (is show.sh still running?)', true);
+    if (killStarted) {
+      const failed = killResult && killResult.status === 'failed';
+      showBanner('Kill all done' + (killResult && killResult.message ? ': ' + killResult.message : '') +
+        '. The launcher is closed; run ./show.sh to start again.', failed);
+      document.querySelectorAll('button').forEach((b) => b.disabled = true);
+    } else {
+      showBanner('launcher not reachable (is show.sh still running?)', true);
+    }
   }
 }
 
@@ -198,8 +250,18 @@ $('steps').addEventListener('click', (e) => {
   const card = e.target.closest('.step');
   if (card) { selected = card.dataset.id; userPicked = true; render(); pollLog(); }
 });
+$('tgrid').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-title]');
+  if (b) post('/api/title?name=' + encodeURIComponent(b.dataset.title));
+});
 $('all').onclick = () => { userPicked = false; post('/api/run_all'); };
 $('cont').onclick = () => { userPicked = false; post('/api/continue'); };
+$('killall').onclick = () => {
+  if (!confirm('Kill all: stop the show on every laptop (pyramid, TV screens, photobooth), stop the audio server, and close the launcher?')) return;
+  killStarted = true;
+  selected = 'killall'; userPicked = true;
+  post('/api/kill_all');
+};
 $('reset').onclick = () => { if (confirm('Mark every step as not started? Nothing gets stopped.')) post('/api/reset'); };
 
 poll();

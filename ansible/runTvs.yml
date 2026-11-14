@@ -1,0 +1,109 @@
+# Runs the skyline slideshow (tvs/skysets.pde) full screen on the [tvs] laptops
+# in config/hosts.ini, reacting to the audio server's OSC on UDP 9000
+# (/audio/lmh, /audio/onset/*, /audio/bpm).
+# Deploy first (deployButcher.yml --limit tvs) and close the OSC monitor.
+# The first [tvs] host leads; the others mirror its state (tvs/sync.pde), so
+# every screen shows the same picture.
+#   ansible-playbook -i config/hosts.ini runTvs.yml
+#   ansible-playbook -i config/hosts.ini runTvs.yml -e stop=true   # stop it
+#
+# Same low-CPU launch as runPyramid.yml: compile once with
+# `Processing cli --build`, then start the sketch JVM directly (no launcher
+# JVM, no debugger), with Cinnamon not compositing the full-screen window.
+- name: Run the tvs skyline sketch
+  hosts: "{{ target | default('tvs') }}"
+  gather_facts: no
+  vars:
+    sketch_dir: "/home/{{ ansible_user }}/Desktop/BUTCHER-3.0/tvs"
+    build_dir: "/home/{{ ansible_user }}/tvs-build"
+    processing: "/home/{{ ansible_user }}/processing-4.5.7/Processing/bin/Processing"
+    core_lib: "/home/{{ ansible_user }}/processing-4.5.7/Processing/lib/app/resources/core/library"
+    java: "/home/{{ ansible_user }}/processing-4.5.7/Processing/lib/app/resources/jdk/bin/java"
+    log: "/home/{{ ansible_user }}/tvs.log"
+    stop: false
+
+  tasks:
+    - name: Stop anything the sketch needs (screen, UDP 9000)
+      ansible.builtin.shell: |
+        pkill -f "[t]vs-build" || true
+        pkill -f "[D]esktop/BUTCHER-3.0/tvs" || true
+        pkill -f "[D]esktop/BUTCHER-3.0/pyramid" || true
+        pkill -f "[D]esktop/BUTCHER-3.0/fftcloud" || true
+        pkill -f "[o]sc_monitor.py" || true
+        pkill -f "[N]DI2.py" || true
+        sleep 1
+        fuser -k -n udp 9000 2>/dev/null || true
+        pkill -9 -f "[t]vs-build" || true
+        true
+      args:
+        executable: /bin/bash
+
+    - name: Stop compositing full-screen windows (Cinnamon)
+      when: not stop | bool
+      ansible.builtin.shell: |
+        export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus
+        gsettings set org.cinnamon.muffin unredirect-fullscreen-windows true
+      args:
+        executable: /bin/bash
+
+    - name: Compile the sketch
+      when: not stop | bool
+      ansible.builtin.shell: |
+        "{{ processing }}" cli --sketch="{{ sketch_dir }}" --output="{{ build_dir }}" --force --build
+        test -f "{{ build_dir }}/skysets.class"
+      args:
+        executable: /bin/bash
+
+    - name: Launch on the laptop's screen
+      when: not stop | bool
+      ansible.builtin.shell: |
+        export DISPLAY=:0
+        export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus
+        # Keep the screen awake (an idle-blanked screen drops the sketch to ~1 fps).
+        xset s off -dpms && xset dpms force on || true
+        # Same picture on every TV: the first host of [tvs] leads, the others
+        # follow its state over UDP 9001 (tvs/sync.pde).
+        {% if inventory_hostname == groups['tvs'][0] %}
+        export TVS_LEADER=1 TVS_PEERS={{ groups['tvs'][1:] | join(',') }}
+        {% endif %}
+        nohup setsid "{{ java }}" -Djna.nosys=true \
+          -Djava.library.path="{{ core_lib }}" \
+          -cp "{{ build_dir }}:{{ core_lib }}/*" \
+          --enable-native-access=ALL-UNNAMED \
+          processing.core.PApplet --sketch-path="{{ sketch_dir }}" skysets \
+          > "{{ log }}" 2>&1 < /dev/null &
+      args:
+        executable: /bin/bash
+
+    - name: Check it came up
+      when: not stop | bool
+      ansible.builtin.shell: |
+        # Loading and preparing the photos takes a while on these laptops.
+        for i in $(seq 1 120); do
+          grep -q "^Slide 1/" "{{ log }}" 2>/dev/null && { grep -E "^Slide 1/|OSC" "{{ log }}"; exit 0; }
+          pgrep -f "[t]vs-build" > /dev/null || break
+          sleep 1
+        done
+        echo "not up after 120 s; last log lines:"; tail -20 "{{ log }}"; exit 1
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    # Java2D's fullScreen() only sizes the window to the screen; Cinnamon's
+    # panel can still sit on top. Make it a real full-screen window.
+    - name: Make the window full screen
+      when: not stop | bool
+      ansible.builtin.shell: |
+        export DISPLAY=:0
+        for i in $(seq 1 20); do
+          wmctrl -l | grep -q " skysets$" && break
+          sleep 0.5
+        done
+        wmctrl -r skysets -b add,fullscreen,above
+        sleep 1
+        w=$(xwininfo -root -tree | awk '/"skysets"/{print $1; exit}')
+        xprop -id "$w" _NET_WM_STATE | grep -q _NET_WM_STATE_FULLSCREEN && echo "full screen" \
+          || { echo "window not full screen"; exit 1; }
+      args:
+        executable: /bin/bash
+      changed_when: false
