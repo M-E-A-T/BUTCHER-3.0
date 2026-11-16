@@ -11,3 +11,42 @@ ansible-playbook -i ansible/config/hosts.ini ansible/installAndRunNdiReceivers.y
 
 ansible-playbook -i ansible/config/hosts.ini ansible/runNdiReceivers.yml -K
 
+
+
+ssh meat@10.10.10.150
+
+
+
+## IF COMPUTER GETS LOCKED
+
+
+meat@meat-OptiPlex-7040:~$ loginctl list-sessions
+SESSION  UID USER SEAT  TTY   STATE  IDLE SINCE
+      3 1000 meat -     pts/0 active no   -    
+     c1 1000 meat seat0 tty7  active no   -    
+
+2 sessions listed.
+
+meat@meat-OptiPlex-7040:~$ sudo loginctl unlock-session 3
+[sudo] password for meat:     
+
+meat@meat-OptiPlex-7040:~$ sudo loginctl unlock-session c1
+
+
+## IF CONTROLLER DISCONNECTS
+
+bluetoothctl power off
+bluetoothctl power on
+
+
+
+## SYSTEM SETTINGS FOR SLEEP
+meat@meat-OptiPlex-7040:~/Desktop/photobooth/output$ gsettings set org.cinnamon.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing'
+meat@meat-OptiPlex-7040:~/Desktop/photobooth/output$ gsettings set org.cinnamon.settings-daemon.plugins.power sleep-inactive-battery-type 'nothing'
+meat@meat-OptiPlex-7040:~/Desktop/photobooth/output$ systemctl is-enabled sleep.target suspend.target hibernate.target hybrid-sleep.target
+masked
+masked
+masked
+masked
+
+gif-20261114-193432.gif

@@ -79,7 +79,8 @@ VisualFilter manualFilter = null;
 final String[] FILTER_NAMES = { "None", "Posterize", "Scanlines", "Thermal" };
 // One effect, masked into whichever zone is not showing the plain photo.
 // 0 = random (one of the three, re-picked each slide).
-int effectChoice = 2; // Contours
+//int effectChoice = 2; // Contours only
+int effectChoice =int(random(3)); //hotfix??
 final String[] EFFECT_NAMES = { "Random", "Signal Glitch", "Contours", "Kaleido Geometry" };
 final int[] EFFECT_IDS = { 5, 3, 6 }; // randomEffect() indices for the names above
 
@@ -492,7 +493,7 @@ void startSlide(int next) {
   upperVisual = createGraphics(W, upperH);
   lowerVisual = createGraphics(W, lowerH);
 
-  makeEffects();
+  makeEffects(effectChoice);
 
   println("Slide " + (slideIndex + 1) + "/" + slides.size() +
           ": " + slides.get(slideIndex).name +
@@ -661,6 +662,7 @@ class RunningFilter {
 // is rendered, so the effect follows the onset swaps automatically.
 int currentEffectId = -1;
 
+// we are commenting out void makeEffects() to see if that fixes the contour-only visuals issue. Uncomment to revert system!! - Addison 9:15pm
 void makeEffects() {
   makeEffects(effectChoice <= 0
     ? EFFECT_IDS[int(random(EFFECT_IDS.length))]
@@ -673,19 +675,19 @@ void makeEffects(int n) {
   effectB = randomEffect(true, n);
   effectA.setup(this, lowerVisual.width, lowerVisual.height);
   effectB.setup(this, upperVisual.width, upperVisual.height);
+  
 }
 
 SkyEffect randomEffect(boolean upperZone, int n) {
   SkyEffect effect;
+  int randomindex = (1 + int(random(3)));
+  n = randomindex;
 
-  if (n == 0) effect = new PlasmaEffect();
-  else if (n == 1) effect = new WaveEffect(upperZone);
-  else if (n == 2) effect = new ParticleEffect();
-  else if (n == 3) effect = new ContourEffect();
-  else if (n == 4) effect = new FluidFieldEffect();
-  else if (n == 5) effect = new SignalGlitchEffect();
-  else if (n == 6) effect = new KaleidoGeometryEffect();
-  else effect = new PlasmaMorphEffect();
+  if (n == 0) effect = new SignalGlitchEffect();
+  else if (n == 2) effect = new ContourEffect();
+  else if (n == 1) effect = new SignalGlitchEffect();
+  else if (n == 3) effect = new KaleidoGeometryEffect();
+  else effect = new KaleidoGeometryEffect();
 
   println("Selected Effect: " + effect.getName());
   return effect;
