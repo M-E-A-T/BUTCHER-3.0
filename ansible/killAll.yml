@@ -18,6 +18,8 @@
         pkill -f "[D]esktop/BUTCHER-3.0/fftcloud" || true
         pkill -f "[p]yramid-run/skyset" || true
         pkill -f "[t]vs-build" || true
+        pkill -f "[e]ye-build" || true
+        pkill -f "[e]ye_yolo.py" || true
         pkill -f "[D]esktop/BUTCHER-3.0/tvs" || true
         pkill -f "[p]smove/boothModes" || true
         pkill -f "[m]ove_bridge.py" || true
@@ -35,6 +37,8 @@
         pkill -9 -f "[D]esktop/BUTCHER-3.0/pyramid" || true
         pkill -9 -f "[D]esktop/BUTCHER-3.0/fftcloud" || true
         pkill -9 -f "[t]vs-build" || true
+        pkill -9 -f "[e]ye-build" || true
+        pkill -9 -f "[e]ye_yolo.py" || true
         pkill -9 -f "[p]smove/boothModes" || true
         pkill -9 -f "[m]ove_bridge.py" || true
         pkill -9 -f "[o]sc_monitor.py" || true
@@ -46,7 +50,7 @@
 
     - name: Check nothing is left
       ansible.builtin.shell: |
-        left=$(pgrep -fa "[D]esktop/BUTCHER-3.0/(pyramid|fftcloud|tvs)|[t]vs-build|[p]smove/boothModes|[m]ove_bridge.py|[o]sc_monitor.py|[N]DI2.py" | cut -c1-80)
+        left=$(pgrep -fa "[D]esktop/BUTCHER-3.0/(pyramid|fftcloud|tvs)|[t]vs-build|[e]ye-build|[e]ye_yolo.py|[p]smove/boothModes|[m]ove_bridge.py|[o]sc_monitor.py|[N]DI2.py" | cut -c1-80)
         port=$(fuser -n udp 9000 2>/dev/null)
         if [ -n "$left$port" ]; then echo "still running: $left $port"; exit 1; fi
         echo clear

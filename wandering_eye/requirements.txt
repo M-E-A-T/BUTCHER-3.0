@@ -1,0 +1,4 @@
+# eye_yolo.py: CPU-only, no torch. The model is in models/yolo11n.onnx.
+onnxruntime
+opencv-python
+numpy

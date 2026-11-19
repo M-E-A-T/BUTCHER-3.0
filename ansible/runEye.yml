@@ -1,0 +1,114 @@
+# Runs the wandering eye (wandering_eye/) full screen on the [eye] laptop(s)
+# in config/hosts.ini. Same idea as the pyramid wall: the audio server's OSC
+# arrives on UDP 9000 (broadcast to the show network), and the sketch's outline
+# follows /audio/fft. The laptop's own webcam feeds eye_yolo.py (YOLO11n, ONNX,
+# CPU, model in wandering_eye/models/), which picks one passer-by to watch and
+# sends /eye/look to the sketch on 127.0.0.1:9000.
+# Deploy first (deployButcher.yml --limit eye). The first launch sets up the
+# Python env in wandering_eye/.venv (onnxruntime, opencv, numpy).
+#   ansible-playbook -i config/hosts.ini runEye.yml
+#   ansible-playbook -i config/hosts.ini runEye.yml -e stop=true   # stop it
+#
+# Same low-CPU launch as runTvs.yml: compile once, start the sketch JVM directly.
+- name: Run the wandering eye
+  hosts: "{{ target | default('eye') }}"
+  gather_facts: no
+  vars:
+    eye_dir: "/home/{{ ansible_user }}/Desktop/BUTCHER-3.0/wandering_eye"
+    build_dir: "/home/{{ ansible_user }}/eye-build"
+    processing: "/home/{{ ansible_user }}/processing-4.5.7/Processing/bin/Processing"
+    core_lib: "/home/{{ ansible_user }}/processing-4.5.7/Processing/lib/app/resources/core/library"
+    java: "/home/{{ ansible_user }}/processing-4.5.7/Processing/lib/app/resources/jdk/bin/java"
+    log: "/home/{{ ansible_user }}/eye.log"
+    yolo_log: "/home/{{ ansible_user }}/eye_yolo.log"
+    stop: false
+
+  tasks:
+    - name: Stop anything the eye needs (screen, camera, UDP 9000)
+      ansible.builtin.shell: |
+        pkill -f "[e]ye-build" || true
+        pkill -f "[e]ye_yolo.py" || true
+        pkill -f "[D]esktop/BUTCHER-3.0/(pyramid|tvs|fftcloud)" || true
+        pkill -f "[t]vs-build" || true
+        pkill -f "[o]sc_monitor.py" || true
+        pkill -f "[N]DI2.py" || true
+        sleep 1
+        fuser -k -n udp 9000 2>/dev/null || true
+        pkill -9 -f "[e]ye-build" || true
+        pkill -9 -f "[e]ye_yolo.py" || true
+        true
+      args:
+        executable: /bin/bash
+
+    - name: Python env for the detector (first run only)
+      when: not stop | bool
+      ansible.builtin.shell: |
+        cd "{{ eye_dir }}"
+        .venv/bin/python -c "import onnxruntime, cv2" 2>/dev/null && exit 0
+        rm -rf .venv && python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt
+        echo installed
+      args:
+        executable: /bin/bash
+      register: venv
+      changed_when: "'installed' in venv.stdout"
+
+    - name: Stop compositing full-screen windows (Cinnamon)
+      when: not stop | bool
+      ansible.builtin.shell: |
+        export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus
+        gsettings set org.cinnamon.muffin unredirect-fullscreen-windows true
+      args:
+        executable: /bin/bash
+
+    - name: Compile the sketch
+      when: not stop | bool
+      ansible.builtin.shell: |
+        "{{ processing }}" cli --sketch="{{ eye_dir }}" --output="{{ build_dir }}" --force --build
+        test -f "{{ build_dir }}/wandering_eye.class"
+      args:
+        executable: /bin/bash
+
+    - name: Launch the detector and the sketch
+      when: not stop | bool
+      ansible.builtin.shell: |
+        export DISPLAY=:0
+        export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus
+        xset s off -dpms && xset dpms force on || true
+        cd "{{ eye_dir }}"
+        # Leave one core for the sketch.
+        nohup setsid .venv/bin/python -u eye_yolo.py --threads $(( $(nproc) > 1 ? $(nproc) - 1 : 1 )) \
+          > "{{ yolo_log }}" 2>&1 < /dev/null &
+        nohup setsid "{{ java }}" -Djna.nosys=true \
+          -Djava.library.path="{{ core_lib }}" \
+          -cp "{{ build_dir }}:{{ core_lib }}/*" \
+          --enable-native-access=ALL-UNNAMED \
+          processing.core.PApplet --sketch-path="{{ eye_dir }}" wandering_eye \
+          > "{{ log }}" 2>&1 < /dev/null &
+      args:
+        executable: /bin/bash
+
+    - name: Check both came up
+      when: not stop | bool
+      ansible.builtin.shell: |
+        for i in $(seq 1 60); do
+          grep -q "fps" "{{ yolo_log }}" 2>/dev/null && grep -q "listening for OSC" "{{ log }}" 2>/dev/null \
+            && { tail -1 "{{ yolo_log }}"; exit 0; }
+          sleep 1
+        done
+        echo "not up after 60 s"; tail -5 "{{ yolo_log }}"; tail -10 "{{ log }}"; exit 1
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Make the window full screen
+      when: not stop | bool
+      ansible.builtin.shell: |
+        export DISPLAY=:0
+        for i in $(seq 1 20); do
+          wmctrl -l | grep -q " wandering_eye$" && break
+          sleep 0.5
+        done
+        wmctrl -r wandering_eye -b add,fullscreen,above
+      args:
+        executable: /bin/bash
+      changed_when: false
